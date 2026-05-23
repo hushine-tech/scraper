@@ -1,0 +1,12 @@
+/logs
+/bin/
+/scraper
+/ensure-scraper-db
+config.local.yaml
+.claude/
+.cursor/
+.idea/
+.opencode/
+
+# Local process documents live outside the code repository.
+/openspec/

@@ -1,0 +1,108 @@
+mode: forward  # forward = 实时采集（5种数据）, reverse = 回溯历史（3种数据）
+
+exchanges:
+  binance:
+    enabled: true
+    database:
+      host: "192.168.88.10"
+      port: 5432
+      user: "postgres"
+      password: "postgres"
+      dbname: "{exchange}_{year}"
+      sslmode: "disable"
+    spot_symbols:
+      - "btcusdt"
+      - "ethusdt"
+      - "bnbusdt"
+      - "xrpusdt"
+      - "solusdt"
+      - "adausdt"
+      - "dogeusdt"
+      - "dotusdt"
+      - "ltcusdt"
+    futures_symbols:
+      - "btcusdt"
+      - "ethusdt"
+      - "bnbusdt"
+      - "xrpusdt"
+      - "solusdt"
+      - "adausdt"
+      - "dogeusdt"
+      - "dotusdt"
+      - "ltcusdt"
+    kline_interval: "2s"
+    kline_intervals: ["1m"]    # 抓取的 K 线周期，默认 ["1m"]，可扩展为 ["1m", "5m", "15m"]
+    depth_interval: "2s"
+    # 恢复模式：只保留 control-plane 驱动的 managed kline。
+    # 关闭所有静态 forward collector，避免 scraper 重启后继续放大 DB/Kafka/日志压力。
+    forward:
+      spot_kline: false
+      futures_kline: false
+      spot_orderbook: false
+      futures_orderbook: false
+      funding_rate: false
+      futures_open_interest: false
+    # 反向模式（回溯历史）— 只支持 K线 和 资金费率
+    reverse:
+      spot_kline: true
+      futures_kline: true
+      funding_rate: true
+      futures_open_interest: true
+      start_time: "2025-01-01T00:00:00Z"
+      end_time: "2026-01-01T00:00:00Z"
+
+  okx:
+    enabled: false
+    database:
+      host: "192.168.88.10"
+      port: 5432
+      user: "postgres"
+      password: "postgres"
+      dbname: "{exchange}_{year}"
+      sslmode: "disable"
+    spot_symbols:
+      - "BTC-USDT"
+      - "ETH-USDT"
+    futures_symbols:
+      - "BTC-USDT"
+      - "ETH-USDT"
+    kline_interval: "1s"
+    depth_interval: "1s"
+    forward:
+      spot_kline: true
+      futures_kline: true
+      spot_orderbook: true
+      futures_orderbook: true
+      funding_rate: true
+      futures_open_interest: false
+    reverse:
+      spot_kline: true
+      futures_kline: true
+      funding_rate: true
+      futures_open_interest: false
+      start_time: "2025-01-01T00:00:00Z"
+      end_time: "2026-01-01T00:00:00Z"
+
+app:
+  scraper_interval: 1
+  shutdown_timeout: 30
+
+# Live market-data Kafka topics do not carry an env segment.
+# Forward/live Binance K-lines publish to:
+#   md.kline.{exchange}.{market}.{interval}
+# Reverse/backfill continues to write TimescaleDB only.
+market_data:
+  kafka:
+    enabled: true
+    brokers:
+      - "192.168.88.10:19092"
+  # Demand-driven managed kline collectors.
+  # enabled=true  → reconcile stream lifecycle from control-panel-service control-plane state.
+  # enabled=false → fall back to static symbol lists in this file only.
+  control_plane:
+    # Phase D2: control plane lives in control-panel-service (gRPC :50054).
+    enabled: true
+    market_data_control_panel_grpc: "127.0.0.1:50054"
+    reconcile_interval_seconds: 5
+    draining_grace_period_seconds: 60
+    request_timeout_seconds: 15

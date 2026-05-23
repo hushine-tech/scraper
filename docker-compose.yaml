@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  binance-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: binance-scraper
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./log-config.json:/app/log-config.json:ro
+    networks:
+      - app-logs-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "touch", "/tmp/scraper.healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  app-logs-net:
+    external: true
+    name: app-logs-net

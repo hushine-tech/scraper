@@ -1,0 +1,17 @@
+{
+  "output_dir": "./logs",
+  "local_file": {
+    "enabled": true
+  },
+  "kafka": {
+    "enabled": true,
+    "brokers": ["192.168.88.10:19092"],
+    "topic": "app-logs",
+    "topic_prefix": "app-logs"
+  },
+  "tracing": {
+    "enabled": true,
+    "endpoint": "http://192.168.88.10:4318",
+    "service_name": "scraper"
+  }
+}
