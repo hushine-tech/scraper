@@ -1,5 +1,6 @@
 /logs
 /bin/
+/.run.pid
 /scraper
 /ensure-scraper-db
 config.local.yaml
