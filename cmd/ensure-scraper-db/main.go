@@ -160,12 +160,46 @@ func applyMigrations(dsn, dbname string, migs []migration) error {
 		return fmt.Errorf("open %s: %w", dbname, err)
 	}
 	defer db.Close()
+	return applyMigrationsToDB(db, dbname, migs)
+}
+
+func applyMigrationsToDB(db *sql.DB, dbname string, migs []migration) error {
 	if err := db.Ping(); err != nil {
 		return fmt.Errorf("ping %s: %w", dbname, err)
 	}
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename   TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`); err != nil {
+		return fmt.Errorf("ensure schema_migrations on %s: %w", dbname, err)
+	}
+
 	for _, m := range migs {
-		if _, err := db.Exec(m.sql); err != nil {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin %s on %s: %w", m.name, dbname, err)
+		}
+		var alreadyApplied bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = $1)`, m.name).Scan(&alreadyApplied); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("check migration %s on %s: %w", m.name, dbname, err)
+		}
+		if alreadyApplied {
+			_ = tx.Rollback()
+			fmt.Printf("[%s] skipped: %s\n", dbname, m.name)
+			continue
+		}
+		if _, err := tx.Exec(m.sql); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("exec %s on %s: %w", m.name, dbname, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, m.name); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %s on %s: %w", m.name, dbname, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s on %s: %w", m.name, dbname, err)
 		}
 		fmt.Printf("[%s] applied: %s\n", dbname, m.name)
 	}
