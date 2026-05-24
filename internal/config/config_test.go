@@ -333,7 +333,7 @@ func TestValidateControlPlaneRequiresTarget(t *testing.T) {
 	}
 
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected missing account-service target validation error")
+		t.Fatal("expected missing core-service target validation error")
 	}
 }
 

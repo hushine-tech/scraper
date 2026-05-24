@@ -32,7 +32,7 @@
 market_data:
   control_plane:
     enabled: true
-    # Phase D2: control plane moved from account-service to control-panel-service.
+    # Phase D2: control plane moved from core-service to control-panel-service.
     market_data_control_panel_grpc: "127.0.0.1:50054"
     reconcile_interval_seconds: 5
     draining_grace_period_seconds: 60
