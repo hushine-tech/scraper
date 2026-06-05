@@ -124,23 +124,16 @@ func loadMigrations(migDir string) ([]migration, error) {
 		return nil, fmt.Errorf("read migrations dir %s: %w", migDir, err)
 	}
 	var names []string
-	hasSplitMigrations := false
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
 		names = append(names, e.Name())
-		if strings.HasPrefix(e.Name(), "000") {
-			hasSplitMigrations = true
-		}
 	}
 	sort.Strings(names)
 
 	out := make([]migration, 0, len(names))
 	for _, name := range names {
-		if hasSplitMigrations && name == "001_init.sql" {
-			continue
-		}
 		body, err := os.ReadFile(filepath.Join(migDir, name))
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)

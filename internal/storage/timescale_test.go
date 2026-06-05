@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/golang-lib/middleware/sqlmiddleware"
+	"github.com/hushine-tech/scraper/internal/logger"
 )
 
 func TestListMigrationFilesSorted(t *testing.T) {
@@ -40,35 +40,6 @@ func TestListMigrationFilesSorted(t *testing.T) {
 	want := []string{"0001_a.sql", "0002_b.sql", "0003_c.sql"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %d files got %d", len(want), len(got))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("unexpected order at %d: want %s got %s", i, want[i], got[i])
-		}
-	}
-}
-
-func TestListMigrationFilesSkipsLegacyInitWhenSplitMigrationsExist(t *testing.T) {
-	dir := t.TempDir()
-	files := []string{
-		"0001_a.sql",
-		"0002_b.sql",
-		"001_init.sql",
-	}
-	for _, file := range files {
-		if err := os.WriteFile(filepath.Join(dir, file), []byte("SELECT 1;"), 0o644); err != nil {
-			t.Fatalf("write file: %v", err)
-		}
-	}
-
-	got, err := listMigrationFiles(dir)
-	if err != nil {
-		t.Fatalf("listMigrationFiles: %v", err)
-	}
-
-	want := []string{"0001_a.sql", "0002_b.sql"}
-	if len(got) != len(want) {
-		t.Fatalf("expected %d files got %d (%v)", len(want), len(got), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {

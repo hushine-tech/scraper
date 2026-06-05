@@ -149,7 +149,7 @@ go build -o bin/scraper ./cmd/scraper
   - `lease`：某个 live session 当前仍在消费该流的 TTL 租约
 - `scraper` 在 `market_data.control_plane.enabled=true` 时按数据库状态 reconcile `starting / running / draining / stopped / error`
 - 运行中的 `kline` 仍然总是写 TimescaleDB；只有 `effective_live_delivery=true` 时才发 Kafka
-- `strategy-service` 的 `mode=2` 启动前会做 readiness preflight，并在运行中续租 lease
+- `strategy-service` 的 demo/live session 启动前会做 readiness preflight，并在运行中续租 lease
 
 当前产品边界：
 
@@ -182,12 +182,12 @@ go build -o bin/scraper ./cmd/scraper
 - live continuous ingestion / historical authoritative store:
   - `{exchange}_{year}`
   - 按 record timestamp/open_time/funding_time/event timestamp 路由到对应年份库
-  - 面向实时 collector、freshness、backfill、coverage verify、`mode=0` / `mode=2`
+  - 面向实时 collector、freshness、backfill、coverage verify、backtest / demo-live session
 
 这意味着：
 
-- `mode=0` 只看 historical coverage，不看 live collector / Kafka
-- `mode=2` 只看 live readiness / freshness；历史请求不会替代 live stream
+- backtest 只看 historical coverage，不看 live collector / Kafka
+- demo/live session 只看 live readiness / freshness；历史请求不会替代 live stream
 
 ## Rollout / Rollback
 
@@ -199,12 +199,12 @@ Rollout:
 4. 验证：
    - historical 请求会落到 `{exchange}_{year}` 库
    - live 请求持续写 `{exchange}_{year}` 库并按 writer lease 保护写入所有权
-   - `mode=0` 能通过历史 coverage preflight
-   - `mode=2` 仍按 live readiness + Kafka delivery 判定
+   - backtest 能通过历史 coverage preflight
+   - demo/live session 仍按 live readiness + Kafka delivery 判定
 
 Rollback:
 
 1. 如果 historical worker 不稳定，可以先停 `scraper` 的 historical runtime，只保留 live runtime。
 2. 页面可以回退为只开放 `live` scope；现有 live request / stream / lease 不受影响。
 3. 已写入的 `{exchange}_{year}` 历史库保持只读，不需要清理。
-4. `mode=0` 仍可以直接按 Timescale 历史库运行，只是不会再通过 market-data 页面主动补数。
+4. backtest 仍可以直接按 Timescale 历史库运行，只是不会再通过 market-data 页面主动补数。

@@ -3,7 +3,7 @@
 这份文档记录 `kline` v1 控制面的 rollout / rollback 操作约定，重点覆盖：
 
 - `scraper` 如何在需求驱动模式和静态配置模式之间切换
-- `strategy-service` 如何开启 / 关闭 `mode=2` readiness preflight 与 lease 管理
+- `strategy-service` 如何开启 / 关闭 demo/live readiness preflight 与 lease 管理
 - 第一次上线不稳定时，如何快速回退到“静态采集 + 无强制 preflight”的旧路径
 
 ## 当前范围
@@ -11,7 +11,7 @@
 当前只覆盖：
 
 - `kline`
-- `mode=2`
+- demo/live session
 - `request / stream / lease`
 - `scraper` reconcile runtime
 - `strategy-service` preflight / lease / diagnostics
@@ -62,11 +62,11 @@ market_data:
 语义：
 
 - `preflight_enabled=true`
-  `mode=2` 启动前强制校验 stream 存在、`running`、freshness 合格、`effective_live_delivery=true`
+  demo/live session 启动前强制校验 stream 存在、`running`、freshness 合格、`effective_live_delivery=true`
 - `preflight_enabled=false`
-  `mode=2` 跳过 control-plane readiness gate，恢复到旧的“直接尝试启动 live session”路径
+  demo/live session 跳过 control-plane readiness gate，直接尝试启动 live session
 - `lease_management_enabled=true`
-  `strategy-service` 为运行中的 `mode=2` session 创建 / 续租 / 最佳努力释放 stream lease
+  `strategy-service` 为运行中的 demo/live session 创建 / 续租 / 最佳努力释放 stream lease
 - `lease_management_enabled=false`
   不再创建或续租 lease；已有 lease 行仅靠 TTL 自然过期
 
@@ -85,7 +85,7 @@ market_data:
 3. 打开 `strategy-service.market_data.preflight_enabled=true`
 4. 打开 `strategy-service.market_data.lease_management_enabled=true`
 5. 通过产品页提交一个新的 `kline` request，确认 `stream.actual_state` 从 `starting` 进入 `running`
-6. 确认 `effective_live_delivery=true` 时 `mode=2` 启动成功
+6. 确认 `effective_live_delivery=true` 时 demo/live session 启动成功
 7. 观察 `strategy-service` diagnostics 是否出现 live session / stream binding / lease heartbeat
 
 建议第一次上线时不要删除静态 symbol 配置。即使 control-plane 出问题，也能在切回静态模式后立刻恢复采集。
@@ -117,7 +117,7 @@ market_data:
 
 ## Rollback 后的预期行为
 
-- `mode=2` 不再因为 control-plane readiness 而返回 `FAILED_PRECONDITION`
+- demo/live session 不再因为 control-plane readiness 而返回 `FAILED_PRECONDITION`
 - `strategy-service` 不再新建或续租 stream lease
 - `scraper` 不再根据 request / lease 动态 start / drain / stop managed collector
 - 已有 lease 会在 TTL 过后自然失效
@@ -129,7 +129,7 @@ market_data:
 - 静态配置中的 `spot_symbols / futures_symbols / kline_intervals` 仍然能产出 K-line
 - TimescaleDB 持续入库
 - closed K-line 仍然按 `md.kline.{exchange}.{market}.{interval}` 发布
-- `mode=2` live session 至少恢复到 rollout 前的行为，不再被 preflight 卡死
+- demo/live session 至少恢复到 rollout 前的行为，不再被 preflight 卡死
 
 ## Dedicated Admin UI
 

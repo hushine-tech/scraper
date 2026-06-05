@@ -12,9 +12,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/hushine-tech/golang-lib/middleware/sqlmiddleware"
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/models"
-	"github.com/hushine-tech/golang-lib/middleware/sqlmiddleware"
 
 	_ "github.com/lib/pq"
 )
@@ -99,29 +99,12 @@ func listMigrationFiles(dir string) ([]string, error) {
 	}
 
 	migrationFiles := make([]string, 0, len(files))
-	hasSplitMigrations := false
 	for _, f := range files {
 		if !f.IsDir() && strings.HasSuffix(f.Name(), ".sql") {
 			migrationFiles = append(migrationFiles, f.Name())
-			if strings.HasPrefix(f.Name(), "000") {
-				hasSplitMigrations = true
-			}
 		}
 	}
 	sort.Strings(migrationFiles)
-
-	// Keep compatibility with legacy one-shot init migration, but avoid
-	// duplicate execution when split migrations are present.
-	if hasSplitMigrations {
-		filtered := make([]string, 0, len(migrationFiles))
-		for _, file := range migrationFiles {
-			if file == "001_init.sql" {
-				continue
-			}
-			filtered = append(filtered, file)
-		}
-		migrationFiles = filtered
-	}
 
 	return migrationFiles, nil
 }
