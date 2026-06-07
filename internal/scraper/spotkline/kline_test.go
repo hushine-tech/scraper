@@ -88,7 +88,7 @@ func TestHandleForwardKlineTracksResumeCursorOnSuccess(t *testing.T) {
 	}
 }
 
-func TestHandleForwardKlineFailureSetsReplayCursorToOpenTime(t *testing.T) {
+func TestHandleForwardKlineFailureDoesNotRewindForLiveReplay(t *testing.T) {
 	store := &fakeStore{}
 	publisher := &fakePublisher{err: context.DeadlineExceeded}
 	kline := models.Kline{
@@ -111,8 +111,46 @@ func TestHandleForwardKlineFailureSetsReplayCursorToOpenTime(t *testing.T) {
 	if len(store.klines) != 1 {
 		t.Fatalf("expected storage write before publish error, got %d", len(store.klines))
 	}
-	if sc.forwardResumeTimeMs != kline.OpenTime.UnixMilli() {
-		t.Fatalf("unexpected replay cursor after publish error: got %d want %d", sc.forwardResumeTimeMs, kline.OpenTime.UnixMilli())
+	if sc.forwardResumeTimeMs != kline.CloseTime.UnixMilli()+1 {
+		t.Fatalf("unexpected resume cursor after publish error: got %d want %d", sc.forwardResumeTimeMs, kline.CloseTime.UnixMilli()+1)
+	}
+}
+
+func TestStoreCatchUpKlinesDoesNotPublishHistoricalBatch(t *testing.T) {
+	store := &fakeStore{}
+	publisher := &fakePublisher{}
+	first := models.Kline{
+		Symbol:    "BTCUSDT",
+		Market:    "spot",
+		Exchange:  "binance",
+		Interval:  "1m",
+		OpenTime:  time.UnixMilli(1_711_929_600_000).UTC(),
+		CloseTime: time.UnixMilli(1_711_929_659_999).UTC(),
+	}
+	second := models.Kline{
+		Symbol:    "BTCUSDT",
+		Market:    "spot",
+		Exchange:  "binance",
+		Interval:  "1m",
+		OpenTime:  time.UnixMilli(1_711_929_660_000).UTC(),
+		CloseTime: time.UnixMilli(1_711_929_719_999).UTC(),
+	}
+	sc := &Scraper{
+		storage:   store,
+		publisher: publisher,
+	}
+
+	if err := sc.storeCatchUpKlines(context.Background(), []models.Kline{first, second}); err != nil {
+		t.Fatalf("storeCatchUpKlines failed: %v", err)
+	}
+	if len(store.klines) != 1 {
+		t.Fatalf("expected catch-up batch to be stored, got %d batches", len(store.klines))
+	}
+	if len(publisher.klines) != 0 {
+		t.Fatalf("expected catch-up batch not to publish, got %#v", publisher.klines)
+	}
+	if sc.forwardResumeTimeMs != second.CloseTime.UnixMilli()+1 {
+		t.Fatalf("unexpected catch-up cursor: got %d want %d", sc.forwardResumeTimeMs, second.CloseTime.UnixMilli()+1)
 	}
 }
 

@@ -13,13 +13,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hushine-tech/golang-lib/middleware/httpclient"
+	"github.com/hushine-tech/golang-lib/middleware/wsclient"
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/marketdata"
 	"github.com/hushine-tech/scraper/internal/models"
 	"github.com/hushine-tech/scraper/internal/scraper"
 	"github.com/hushine-tech/scraper/internal/storage"
-	"github.com/hushine-tech/golang-lib/middleware/httpclient"
-	"github.com/hushine-tech/golang-lib/middleware/wsclient"
 
 	"github.com/gorilla/websocket"
 )
@@ -272,7 +272,7 @@ func (s *Scraper) catchUpForward(ctx context.Context) error {
 		if len(closed) == 0 {
 			return nil
 		}
-		if err := s.storeForwardKlines(ctx, closed); err != nil {
+		if err := s.storeCatchUpKlines(ctx, closed); err != nil {
 			return err
 		}
 
@@ -289,12 +289,29 @@ func (s *Scraper) storeForwardKlines(ctx context.Context, klines []models.Kline)
 		return nil
 	}
 	if err := s.storeKlines(ctx, klines); err != nil {
-		if s.forwardResumeTimeMs == 0 || klines[0].OpenTime.UnixMilli() < s.forwardResumeTimeMs {
-			s.forwardResumeTimeMs = klines[0].OpenTime.UnixMilli()
-		}
+		s.forwardResumeTimeMs = klines[len(klines)-1].CloseTime.UnixMilli() + 1
 		return err
 	}
 	s.forwardResumeTimeMs = klines[len(klines)-1].CloseTime.UnixMilli() + 1
+	return nil
+}
+
+func (s *Scraper) storeCatchUpKlines(ctx context.Context, klines []models.Kline) error {
+	if len(klines) == 0 {
+		return nil
+	}
+	if err := s.storeKlinesWithoutPublish(ctx, klines); err != nil {
+		return err
+	}
+	s.forwardResumeTimeMs = klines[len(klines)-1].CloseTime.UnixMilli() + 1
+	logger.NewScraperLifecycleHelper().Event("WARN", "spot_kline_live_catchup_publish_skipped", map[string]any{
+		"exchange":       s.exchange,
+		"symbol":         s.symbol,
+		"interval":       s.interval,
+		"rows":           len(klines),
+		"first_close_ms": klines[0].CloseTime.UnixMilli(),
+		"last_close_ms":  klines[len(klines)-1].CloseTime.UnixMilli(),
+	})
 	return nil
 }
 
@@ -310,6 +327,17 @@ func (s *Scraper) storeKlines(ctx context.Context, klines []models.Kline) error 
 		return nil
 	}
 	if err := s.publisher.PublishKlines(ctx, klines); err != nil {
+		return err
+	}
+	s.notifyStored(klines)
+	return nil
+}
+
+func (s *Scraper) storeKlinesWithoutPublish(ctx context.Context, klines []models.Kline) error {
+	if len(klines) == 0 {
+		return nil
+	}
+	if err := s.storage.InsertKline(ctx, klines); err != nil {
 		return err
 	}
 	s.notifyStored(klines)

@@ -43,6 +43,36 @@ func TestFilterClosedKlinesDropsOpenTail(t *testing.T) {
 	}
 }
 
+func TestSelectForwardPublishKlinesDoesNotPublishBootstrapBatch(t *testing.T) {
+	now := time.UnixMilli(1_711_929_720_000).UTC()
+	closed := []models.Kline{
+		{CloseTime: now.Add(-2 * time.Minute)},
+		{CloseTime: now.Add(-time.Second)},
+	}
+
+	publish := selectForwardPublishKlines(closed, false, now.UnixMilli())
+
+	if len(publish) != 0 {
+		t.Fatalf("expected bootstrap REST batch not to publish live data, got %#v", publish)
+	}
+}
+
+func TestSelectForwardPublishKlinesOnlyPublishesSingleFreshBar(t *testing.T) {
+	now := time.UnixMilli(1_711_929_720_000).UTC()
+	fresh := models.Kline{CloseTime: now.Add(-30 * time.Second)}
+	old := models.Kline{CloseTime: now.Add(-2 * time.Minute)}
+
+	if publish := selectForwardPublishKlines([]models.Kline{fresh}, true, now.UnixMilli()); len(publish) != 1 || publish[0].CloseTime != fresh.CloseTime {
+		t.Fatalf("expected one fresh live bar to publish, got %#v", publish)
+	}
+	if publish := selectForwardPublishKlines([]models.Kline{old}, true, now.UnixMilli()); len(publish) != 0 {
+		t.Fatalf("expected stale live bar not to publish, got %#v", publish)
+	}
+	if publish := selectForwardPublishKlines([]models.Kline{old, fresh}, true, now.UnixMilli()); len(publish) != 0 {
+		t.Fatalf("expected catch-up batch not to publish, got %#v", publish)
+	}
+}
+
 func TestStoreKlinesSkipsPublishInReverseMode(t *testing.T) {
 	store := &fakeStore{}
 	publisher := &fakePublisher{}

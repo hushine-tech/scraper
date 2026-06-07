@@ -11,18 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hushine-tech/golang-lib/middleware/httpclient"
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/marketdata"
 	"github.com/hushine-tech/scraper/internal/models"
 	"github.com/hushine-tech/scraper/internal/scraper"
 	"github.com/hushine-tech/scraper/internal/storage"
-	"github.com/hushine-tech/golang-lib/middleware/httpclient"
 )
 
 const (
-	restURL         = "https://fapi.binance.com/fapi/v1/klines"
-	forwardInterval = 5 * time.Second
-	maxRetries      = 3
+	restURL                   = "https://fapi.binance.com/fapi/v1/klines"
+	forwardInterval           = 5 * time.Second
+	maxForwardPublishKlineAge = time.Minute
+	maxRetries                = 3
 )
 
 type klineSink interface {
@@ -112,17 +113,23 @@ func (s *Scraper) forward(ctx context.Context) {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			cursorSeeded := lastCloseTime > 0
 			klines, err := s.fetch(ctx, lastCloseTime)
 			if err != nil {
 				continue
 			}
 
-			closed := filterClosedKlines(klines, time.Now().UnixMilli())
+			nowMs := time.Now().UnixMilli()
+			closed := filterClosedKlines(klines, nowMs)
 			if len(closed) == 0 {
 				continue
 			}
 
-			if err := s.storeKlines(ctx, closed); err != nil {
+			publish := selectForwardPublishKlines(closed, cursorSeeded, nowMs)
+			if len(publish) == 0 {
+				s.logForwardPublishSkip(closed, cursorSeeded, nowMs)
+			}
+			if err := s.storeKlinesWithPublish(ctx, closed, publish); err != nil {
 				continue
 			}
 
@@ -173,18 +180,27 @@ func (s *Scraper) reverse(ctx context.Context) {
 }
 
 func (s *Scraper) storeKlines(ctx context.Context, klines []models.Kline) error {
+	return s.storeKlinesWithPublish(ctx, klines, klines)
+}
+
+func (s *Scraper) storeKlinesWithPublish(ctx context.Context, klines []models.Kline, publish []models.Kline) error {
 	if len(klines) == 0 {
 		return nil
 	}
 	if err := s.storage.InsertKline(ctx, klines); err != nil {
 		return err
 	}
-	if s.direction == scraper.DirectionReverse || s.publisher == nil {
+	if s.direction == scraper.DirectionReverse || s.publisher == nil || len(publish) == 0 {
 		s.notifyStored(klines)
 		return nil
 	}
-	if err := s.publisher.PublishKlines(ctx, klines); err != nil {
-		return err
+	if err := s.publisher.PublishKlines(ctx, publish); err != nil {
+		logger.NewScraperLifecycleHelper().Event("ERROR", "futures_kline_live_publish_failed", map[string]any{
+			"exchange": s.exchange,
+			"symbol":   s.symbol,
+			"interval": s.interval,
+			"error":    err.Error(),
+		})
 	}
 	s.notifyStored(klines)
 	return nil
@@ -206,6 +222,38 @@ func filterClosedKlines(klines []models.Kline, nowMs int64) []models.Kline {
 		filtered = append(filtered, kline)
 	}
 	return filtered
+}
+
+func selectForwardPublishKlines(closed []models.Kline, cursorSeeded bool, nowMs int64) []models.Kline {
+	if !cursorSeeded || len(closed) != 1 {
+		return nil
+	}
+	kline := closed[0]
+	if nowMs-kline.CloseTime.UnixMilli() > maxForwardPublishKlineAge.Milliseconds() {
+		return nil
+	}
+	return []models.Kline{kline}
+}
+
+func (s *Scraper) logForwardPublishSkip(closed []models.Kline, cursorSeeded bool, nowMs int64) {
+	if len(closed) == 0 {
+		return
+	}
+	reason := "catchup_batch"
+	if !cursorSeeded {
+		reason = "bootstrap_batch"
+	} else if len(closed) == 1 && nowMs-closed[0].CloseTime.UnixMilli() > maxForwardPublishKlineAge.Milliseconds() {
+		reason = "stale_bar"
+	}
+	logger.NewScraperLifecycleHelper().Event("WARN", "futures_kline_live_publish_skipped", map[string]any{
+		"exchange":       s.exchange,
+		"symbol":         s.symbol,
+		"interval":       s.interval,
+		"reason":         reason,
+		"rows":           len(closed),
+		"first_close_ms": closed[0].CloseTime.UnixMilli(),
+		"last_close_ms":  closed[len(closed)-1].CloseTime.UnixMilli(),
+	})
 }
 
 func (s *Scraper) fetch(ctx context.Context, sinceCloseTime int64) ([]models.Kline, error) {
