@@ -4,8 +4,8 @@
 //
 // Scraper's main binary also auto-migrates at boot via storage.InitSchema, so
 // this CLI is mainly a deploy-time convenience for operators who want DBs
-// ready before services come online. Running both is safe — migrations use
-// IF NOT EXISTS / ON CONFLICT and are idempotent.
+// ready before services come online. Running both is safe — migrations are
+// serialized with the runtime migration advisory lock and use idempotent DDL.
 //
 // Usage:
 //
@@ -23,6 +23,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -34,6 +35,8 @@ import (
 
 	_ "github.com/lib/pq"
 )
+
+const scraperMigrationAdvisoryLockKey int64 = 0x4853484e53435250
 
 func main() {
 	if err := run(); err != nil {
@@ -157,10 +160,24 @@ func applyMigrations(dsn, dbname string, migs []migration) error {
 }
 
 func applyMigrationsToDB(db *sql.DB, dbname string, migs []migration) error {
-	if err := db.Ping(); err != nil {
+	ctx := context.Background()
+	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping %s: %w", dbname, err)
 	}
-	if _, err := db.Exec(`
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("conn %s: %w", dbname, err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, scraperMigrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("lock migrations on %s: %w", dbname, err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, scraperMigrationAdvisoryLockKey)
+	}()
+
+	if _, err := conn.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename   TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -169,7 +186,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	}
 
 	for _, m := range migs {
-		tx, err := db.Begin()
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin %s on %s: %w", m.name, dbname, err)
 		}

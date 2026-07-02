@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,45 @@ func TestMigrationsContainIdempotentGuards(t *testing.T) {
 		if strings.Contains(content, "create table") && !strings.Contains(content, "create table if not exists") {
 			t.Fatalf("migration %s should use CREATE TABLE IF NOT EXISTS", file)
 		}
+	}
+}
+
+func TestRunMigrationsUsesLedgerAndAdvisoryLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "0001_existing.sql"), []byte("SELECT existing"), 0o644); err != nil {
+		t.Fatalf("write existing migration: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "0002_new.sql"), []byte("SELECT new"), 0o644); err != nil {
+		t.Fatalf("write new migration: %v", err)
+	}
+
+	state := &runtimeMigrationState{
+		applied: map[string]bool{
+			"0001_existing.sql": true,
+		},
+	}
+	db, cleanup := newRuntimeMigrationMockDB(t, state)
+	defer cleanup()
+
+	ts := &TimescaleDB{
+		db:            db,
+		migrationsDir: dir,
+	}
+	if err := ts.runMigrations(context.Background()); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+
+	if got := state.execCount("SELECT existing"); got != 0 {
+		t.Fatalf("already applied migration executed %d times, want 0", got)
+	}
+	if got := state.execCount("SELECT new"); got != 1 {
+		t.Fatalf("new migration executed %d times, want 1", got)
+	}
+	if !state.appliedMigration("0002_new.sql") {
+		t.Fatalf("new migration was not recorded in schema_migrations")
+	}
+	if got := state.execCountPrefix("SELECT pg_advisory_xact_lock"); got != 1 {
+		t.Fatalf("advisory lock executed %d times, want 1", got)
 	}
 }
 
@@ -253,4 +293,140 @@ func newMockDB(t *testing.T, behavior execBehavior) (*sql.DB, func()) {
 	return db, func() {
 		_ = db.Close()
 	}
+}
+
+var runtimeMigrationMockDriverSeq atomic.Uint64
+
+type runtimeMigrationState struct {
+	mu      sync.Mutex
+	applied map[string]bool
+	execSQL []string
+}
+
+func (s *runtimeMigrationState) appliedMigration(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.applied[name]
+}
+
+func (s *runtimeMigrationState) execCount(query string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var count int
+	for _, got := range s.execSQL {
+		if got == query {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *runtimeMigrationState) execCountPrefix(prefix string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var count int
+	for _, got := range s.execSQL {
+		if strings.HasPrefix(got, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func newRuntimeMigrationMockDB(t *testing.T, state *runtimeMigrationState) (*sql.DB, func()) {
+	t.Helper()
+	driverName := fmt.Sprintf("runtime_migration_mock_%d", runtimeMigrationMockDriverSeq.Add(1))
+	sql.Register(driverName, runtimeMigrationDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open runtime migration mock db: %v", err)
+	}
+	return db, func() {
+		_ = db.Close()
+	}
+}
+
+type runtimeMigrationDriver struct {
+	state *runtimeMigrationState
+}
+
+func (d runtimeMigrationDriver) Open(string) (driver.Conn, error) {
+	return &runtimeMigrationConn{state: d.state}, nil
+}
+
+type runtimeMigrationConn struct {
+	state *runtimeMigrationState
+}
+
+func (c *runtimeMigrationConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare is not implemented")
+}
+
+func (c *runtimeMigrationConn) Close() error {
+	return nil
+}
+
+func (c *runtimeMigrationConn) Begin() (driver.Tx, error) {
+	return runtimeMigrationTx{}, nil
+}
+
+func (c *runtimeMigrationConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	normalized := strings.TrimSpace(query)
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	if c.state.applied == nil {
+		c.state.applied = map[string]bool{}
+	}
+	c.state.execSQL = append(c.state.execSQL, normalized)
+	if strings.HasPrefix(normalized, "INSERT INTO schema_migrations") && len(args) > 0 {
+		c.state.applied[fmt.Sprint(args[0].Value)] = true
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func (c *runtimeMigrationConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	normalized := strings.TrimSpace(query)
+	if strings.HasPrefix(normalized, "SELECT EXISTS(SELECT 1 FROM schema_migrations") {
+		filename := ""
+		if len(args) > 0 {
+			filename = fmt.Sprint(args[0].Value)
+		}
+		c.state.mu.Lock()
+		applied := c.state.applied[filename]
+		c.state.mu.Unlock()
+		return &runtimeMigrationRows{values: []driver.Value{applied}}, nil
+	}
+	return nil, fmt.Errorf("unexpected query: %s", query)
+}
+
+type runtimeMigrationTx struct{}
+
+func (runtimeMigrationTx) Commit() error {
+	return nil
+}
+
+func (runtimeMigrationTx) Rollback() error {
+	return nil
+}
+
+type runtimeMigrationRows struct {
+	values []driver.Value
+	read   bool
+}
+
+func (r *runtimeMigrationRows) Columns() []string {
+	return []string{"exists"}
+}
+
+func (r *runtimeMigrationRows) Close() error {
+	return nil
+}
+
+func (r *runtimeMigrationRows) Next(dest []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	copy(dest, r.values)
+	return nil
 }

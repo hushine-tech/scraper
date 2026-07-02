@@ -28,6 +28,8 @@ type TimescaleDB struct {
 	writeRouter   *MarketDataWriteRouter
 }
 
+const scraperMigrationAdvisoryLockKey int64 = 0x4853484e53435250
+
 func NewTimescaleDB(connStr string, exchange string, migrationsDir string) (*TimescaleDB, error) {
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
@@ -76,20 +78,48 @@ func (ts *TimescaleDB) runMigrations(ctx context.Context) error {
 		return err
 	}
 
+	tx, err := ts.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin scraper migrations: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, scraperMigrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("lock scraper migrations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+	filename   TEXT PRIMARY KEY,
+	applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
+
 	for _, file := range migrationFiles {
+		var alreadyApplied bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = $1)`, file).Scan(&alreadyApplied); err != nil {
+			return fmt.Errorf("check migration %s: %w", file, err)
+		}
+		if alreadyApplied {
+			continue
+		}
+
 		filePath := filepath.Join(ts.migrationsDir, file)
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return fmt.Errorf("failed to read migration file %s: %w", file, err)
 		}
 
-		_, err = ts.sqlExec.ExecContext(ctx, string(content))
+		_, err = tx.ExecContext(ctx, string(content))
 		if err != nil {
 			return fmt.Errorf("failed to execute migration %s: %w", file, err)
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING`, file); err != nil {
+			return fmt.Errorf("record migration %s: %w", file, err)
+		}
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func listMigrationFiles(dir string) ([]string, error) {
