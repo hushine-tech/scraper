@@ -5,7 +5,7 @@ import "time"
 type HistoricalRequest struct {
 	RequestID        int64
 	UserID           int64
-	AccountID        int64
+	PortfolioID        int64
 	Key              StreamKey
 	Status           string
 	RequestedStartAt *time.Time

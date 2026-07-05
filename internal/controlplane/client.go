@@ -207,7 +207,7 @@ func fromProtoHistoricalRequest(req *mdv1.MarketDataRequest) HistoricalRequest {
 	out := HistoricalRequest{
 		RequestID: req.GetRequestId(),
 		UserID:    req.GetUserId(),
-		AccountID: req.GetAccountId(),
+		PortfolioID: req.GetPortfolioId(),
 		Status:    strings.ToLower(strings.TrimSpace(req.GetStatus())),
 		LastError: strings.TrimSpace(req.GetLastError()),
 		Key: StreamKey{

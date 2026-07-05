@@ -129,7 +129,7 @@
 
 - `request_id`
 - `user_id`
-- `account_id` 或其他归属标识
+- `portfolio_id` 或其他归属标识
 - `exchange`
 - `market`
 - `kind`
@@ -170,7 +170,7 @@
 - `lease_id`
 - `session_id`
 - `strategy_id`
-- `account_id`
+- `portfolio_id`
 - `stream_id`
 - `expires_at`
 - `last_heartbeat_at`

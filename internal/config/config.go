@@ -56,7 +56,7 @@ type MarketDataControlPlaneConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Phase D2: target moved from core-service to control-panel-service.
 	// The YAML key was renamed accordingly. The legacy field name (kept as
-	// `account_service_grpc` until D2) is no longer accepted.
+	// `portfolio_service_grpc` until D2) is no longer accepted.
 	MarketDataControlPanelGRPC string `yaml:"market_data_control_panel_grpc"`
 	ReconcileIntervalSeconds   int    `yaml:"reconcile_interval_seconds"`
 	DrainingGracePeriodSeconds int    `yaml:"draining_grace_period_seconds"`

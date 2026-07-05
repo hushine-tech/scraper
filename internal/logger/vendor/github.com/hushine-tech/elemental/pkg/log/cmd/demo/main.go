@@ -43,8 +43,8 @@ func main() {
 
 	sdklog.ExtAPI(ctx, sdklog.ExtAPILogEntry{
 		APIName:       "Binance",
-		URL:           "GET /api/v3/account",
-		FullURL:       "https://api.binance.com/api/v3/account",
+		URL:           "GET /api/v3/portfolio",
+		FullURL:       "https://api.binance.com/api/v3/portfolio",
 		RequestHeader: map[string]string{"X-MBX-APIKEY": "demo-key"},
 		RequestParams: map[string]any{"recvWindow": 5000},
 		RequestBody:   "",

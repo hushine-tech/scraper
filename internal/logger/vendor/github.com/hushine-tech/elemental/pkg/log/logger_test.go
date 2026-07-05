@@ -301,8 +301,8 @@ func TestExtAPILog(t *testing.T) {
 
 	logger.ExtAPI(context.Background(), ExtAPILogEntry{
 		APIName:        "Binance",
-		URL:            "GET /api/v3/account",
-		FullURL:        "https://api.binance.com/api/v3/account",
+		URL:            "GET /api/v3/portfolio",
+		FullURL:        "https://api.binance.com/api/v3/portfolio",
 		RequestHeader:  map[string]string{"X-MBX-APIKEY": "test-key"},
 		RequestParams:  map[string]any{"recvWindow": 5000},
 		RequestBody:    "",
@@ -326,11 +326,11 @@ func TestExtAPILog(t *testing.T) {
 	if entry["latency_ms"] != float64(150) {
 		t.Errorf("expected latency_ms=150, got %v", entry["latency_ms"])
 	}
-	if entry["url"] != "GET /api/v3/account" {
-		t.Errorf("expected url=GET /api/v3/account, got %v", entry["url"])
+	if entry["url"] != "GET /api/v3/portfolio" {
+		t.Errorf("expected url=GET /api/v3/portfolio, got %v", entry["url"])
 	}
-	if entry["full_url"] != "https://api.binance.com/api/v3/account" {
-		t.Errorf("expected full_url=https://api.binance.com/api/v3/account, got %v", entry["full_url"])
+	if entry["full_url"] != "https://api.binance.com/api/v3/portfolio" {
+		t.Errorf("expected full_url=https://api.binance.com/api/v3/portfolio, got %v", entry["full_url"])
 	}
 	if params, ok := entry["request_params"].(map[string]any); !ok {
 		t.Errorf("expected request_params map, got %T", entry["request_params"])
