@@ -16,8 +16,9 @@ Migration files follow the naming convention: `NNNN_description.sql`
   and `{market}_{data_type}_{symbol_lower}` for orderbook / funding / OI.
   Historical backfill separates years by database (`{exchange}_{year}`), not by
   table suffix.
-- `0008_symbol_year_partitioning.sql` keeps legacy symbol-year helper functions
-  for old environments and read fallback only. It is not the current write path.
+- `0001_current_schema_baseline.sql` contains both the fixed read-fallback
+  tables and the symbol/year helper functions used for compatibility reads.
+  It is the only fresh-bootstrap migration.
 - Legacy fixed tables (for example `futures_klines`) are retained as read-only fallback for historical data.
 - Legacy symbol-year tables (for example `futures_klines_BTCUSDT_2026`) may still
   exist in old environments, but they are not part of fresh bootstrap.
