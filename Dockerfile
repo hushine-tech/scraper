@@ -6,14 +6,14 @@ WORKDIR /app
 # Install dependencies
 RUN apk add --no-cache git
 
-# Copy go mod files and vendor
+# Copy Go module files
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code (including internal/logger/vendor for elemental)
+# Copy source code
 COPY . .
 
-# Build binary using vendor
+# Build binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/scraper ./cmd/scraper/
 
 # Runtime stage
