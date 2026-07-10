@@ -1,25 +1,25 @@
 # Scraper
 
-> 更新时间：2026-05-16
+> 更新时间：2026-07-10
 
 ## 概述
 
-Binance 交易所数据采集服务，将采集的数据写入 TimescaleDB 时序数据库，运行时日志通过 Kafka 接入 ELK。
+Binance 交易所行情采集服务。采集结果按事件时间写入 TimescaleDB；满足实时投递条件的已完成 K 线还可发布到 Kafka。运行日志使用独立的 `log-config.json` 配置。
 
 ---
 
-## 采集数据
+## 采集能力
 
-6 类数据，9 个交易币种：BTC / ETH / BNB / XRP / SOL / ADA / DOGE / DOT / LTC
+当前 collector 支持：
 
-| 数据类型       | 采集方式   | 说明                         |
-|--------------|----------|------------------------------|
-| 现货 K线      | WebSocket | Binance `@kline_1s`         |
-| 期货 K线      | REST轮询  | 1分钟K线，5秒轮询             |
-| 现货盘口      | WebSocket | Binance `@depth20@100ms`    |
-| 期货盘口      | REST轮询  | 2秒轮询                       |
-| Funding Fee  | WebSocket | Binance `@funding`           |
-| Open Interest| WebSocket | Binance `@open_interest`     |
+- 现货 / 期货 K 线
+- 现货 / 期货 order book
+- 期货 funding rate
+- 期货 open interest
+
+Funding rate 使用 REST 轮询。Open interest 支持当前 WebSocket 路径，并在配置对应模式时使用 REST fallback。
+
+`config.yaml` 默认关闭所有静态 forward collector；当前 K 线流由 control-panel 的用户需求聚合结果驱动。配置中的 symbol 列表是静态采集模式的候选范围，不表示这些币种始终都会启动采集。
 
 ---
 
@@ -58,56 +58,47 @@ futures_orderbook_btcusdt
 ## 架构
 
 ```
-Scraper (Go)
+control-panel-service（K 线需求 / stream / lease）
     |
-    +-- WebSocket 实时数据 --> TimescaleDB
-    |                               |
-    |   现货K线 @kline_1s            |
-    |   现货盘口 @depth20@100ms      |
-    |   资金费率 @funding            |
-    |   持仓量 @open_interest        |
+    v
+Scraper (Go) -- REST / WebSocket collectors --> {exchange}_{year} TimescaleDB
     |
-    +-- REST 轮询 --> TimescaleDB
-    |                               |
-    |   期货K线 (5秒间隔)             |
-    |   期货盘口 (2秒间隔)            |
-    |
-    +-- Kafka --> ELK
-        日志 (app-logs topic)
+    +-- finalized live K-line（effective_live_delivery=true）--> Kafka
+
+Scraper runtime logging -- log-config.json --> local files / optional Kafka
 ```
 
 ---
 
 ## 配置
 
-配置文件：`config.yaml`
+行情采集配置文件是 `config.yaml`。仓库默认值关闭 Binance 的静态 forward collectors，并启用 control-panel 驱动的 managed K-line：
 
 ```yaml
-symbols:
-  - btcusdt
-  - ethusdt
-  - bnbusdt
-  - xrpusdt
-  - solusdt
-  - adausdt
-  - dogeusdt
-  - dotusdt
-  - ltcusdt
+exchanges:
+  binance:
+    forward:
+      spot_kline: false
+      futures_kline: false
+      spot_orderbook: false
+      futures_orderbook: false
+      funding_rate: false
+      futures_open_interest: false
 
-kline_interval: 2s
-orderbook_interval: 2s
+market_data:
+  control_plane:
+    enabled: true
 ```
 
 ---
 
 ## 日志
 
-运行时日志通过 Kafka 接入 ELK，不写本地文件。
+运行时日志与行情采集分开配置，日志配置文件是 `log-config.json`。仓库默认值：
 
-- Topic: `app-logs`
-- Broker: `kafka:29092`（Docker网络内）
-- Partition: 8
-- Consumer: 2 个 kafka-es-bridge 实例
+- 本地文件：启用，输出目录 `./logs`
+- Kafka：禁用；启用后可通过配置指定 broker、topic 和 topic prefix
+- tracing：禁用
 
 ---
 
@@ -122,13 +113,16 @@ go build -o bin/scraper ./cmd/scraper
 ./bin/scraper
 ```
 
+`docker compose up -d` 是有效的启动方式，但 Compose 引用的外部 `app-logs-net` 网络以及 TimescaleDB、Kafka 等基础设施必须预先存在。
+
 ---
 
 ## 状态
 
 - 交易所：Binance（OKX 待实现）
 - TimescaleDB 写入：✅
-- Kafka 日志：✅
+- 本地日志：✅（仓库默认启用）
+- Kafka 日志：可选（仓库默认禁用）
 - Kafka 市场数据：✅ Live K-line 已接通（`md.kline.{exchange}.{market}.{interval}`，仅 closed bar）
 
 ## Live K-line Kafka
