@@ -17,7 +17,7 @@ Binance 交易所行情采集服务。采集结果按事件时间写入 Timescal
 - 期货 funding rate
 - 期货 open interest
 
-Funding rate 使用 REST 轮询。Open interest 支持当前 WebSocket 路径，并在配置对应模式时使用 REST fallback。
+Funding rate 使用 REST 轮询。Open interest 的 forward collector 优先使用 REST 轮询，REST 失败时回退到当前 WebSocket 路径。
 
 `config.yaml` 默认关闭所有静态 forward collector；当前 K 线流由 control-panel 的用户需求聚合结果驱动。配置中的 symbol 列表是静态采集模式的候选范围，不表示这些币种始终都会启动采集。
 
