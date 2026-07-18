@@ -4,6 +4,7 @@
 /scraper
 /ensure-scraper-db
 config.local.yaml
+log-config.local.json
 .claude/
 .cursor/
 .idea/
