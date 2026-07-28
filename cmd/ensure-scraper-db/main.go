@@ -20,6 +20,14 @@
 // Or set SCRAPER_EXCHANGES and SCRAPER_YEARS, e.g.:
 //
 //	SCRAPER_EXCHANGES=binance SCRAPER_YEARS=2025,2026 go run ./cmd/ensure-scraper-db
+//
+// Isolated deployments may prepend a safe owned namespace while preserving
+// the exchange/year suffix expected by readers:
+//
+//	SCRAPER_DATABASE_PREFIX=hushine_stage_ SCRAPER_EXCHANGES=binance SCRAPER_YEARS=2025 go run ./cmd/ensure-scraper-db
+//
+// SCRAPER_DBS and SCRAPER_DATABASE_PREFIX are mutually exclusive: an explicit
+// database list is never silently rewritten by a deployment prefix.
 package main
 
 import (
@@ -224,8 +232,15 @@ func getenv(k, def string) string {
 }
 
 func targetDatabases(currentYear int) ([]string, error) {
-	if raw := strings.TrimSpace(os.Getenv("SCRAPER_DBS")); raw != "" {
-		parts := splitCSV(raw)
+	rawDatabases := strings.TrimSpace(os.Getenv("SCRAPER_DBS"))
+	rawPrefix := strings.TrimSpace(os.Getenv("SCRAPER_DATABASE_PREFIX"))
+	if rawDatabases != "" && rawPrefix != "" {
+		return nil, fmt.Errorf(
+			"SCRAPER_DBS and SCRAPER_DATABASE_PREFIX must not be combined",
+		)
+	}
+	if rawDatabases != "" {
+		parts := splitCSV(rawDatabases)
 		targets := make([]string, 0, len(parts))
 		for _, dbname := range parts {
 			if err := validateExchangeYearDatabase(dbname); err != nil {
@@ -236,6 +251,10 @@ func targetDatabases(currentYear int) ([]string, error) {
 		return targets, nil
 	}
 
+	prefix, err := configuredDatabasePrefix()
+	if err != nil {
+		return nil, err
+	}
 	exchanges := splitCSV(getenv("SCRAPER_EXCHANGES", "binance,okx"))
 	years, err := targetYears(getenv("SCRAPER_YEARS", strconv.Itoa(currentYear)))
 	if err != nil {
@@ -247,13 +266,36 @@ func targetDatabases(currentYear int) ([]string, error) {
 			return nil, fmt.Errorf("unsupported scraper exchange %q", exchange)
 		}
 		for _, year := range years {
-			targets = append(targets, fmt.Sprintf("%s_%d", exchange, year))
+			database := fmt.Sprintf("%s%s_%d", prefix, exchange, year)
+			if !isValidIdent(database) {
+				return nil, fmt.Errorf(
+					"generated scraper database name %q is not a safe PostgreSQL identifier",
+					database,
+				)
+			}
+			targets = append(targets, database)
 		}
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no scraper target databases configured")
 	}
 	return targets, nil
+}
+
+func configuredDatabasePrefix() (string, error) {
+	prefix := strings.TrimSpace(os.Getenv("SCRAPER_DATABASE_PREFIX"))
+	if prefix == "" {
+		return "", nil
+	}
+	if !strings.HasSuffix(prefix, "_") || !isValidIdent(prefix[:len(prefix)-1]) {
+		return "", fmt.Errorf(
+			"SCRAPER_DATABASE_PREFIX must be a safe PostgreSQL identifier prefix ending in underscore",
+		)
+	}
+	if strings.ToLower(prefix) != prefix {
+		return "", fmt.Errorf("SCRAPER_DATABASE_PREFIX must be lowercase")
+	}
+	return prefix, nil
 }
 
 func splitCSV(raw string) []string {

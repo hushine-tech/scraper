@@ -17,6 +17,7 @@ func TestTargetDatabasesDefaultToCurrentYearExchangeDatabases(t *testing.T) {
 	t.Setenv("SCRAPER_DBS", "")
 	t.Setenv("SCRAPER_EXCHANGES", "")
 	t.Setenv("SCRAPER_YEARS", "")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "")
 
 	got, err := targetDatabases(2026)
 	if err != nil {
@@ -30,6 +31,7 @@ func TestTargetDatabasesDefaultToCurrentYearExchangeDatabases(t *testing.T) {
 
 func TestTargetDatabasesAllowExplicitYearDatabases(t *testing.T) {
 	t.Setenv("SCRAPER_DBS", "binance_2025, okx_2026")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "")
 
 	got, err := targetDatabases(2026)
 	if err != nil {
@@ -43,6 +45,7 @@ func TestTargetDatabasesAllowExplicitYearDatabases(t *testing.T) {
 
 func TestTargetDatabasesRejectFixedExchangeDatabases(t *testing.T) {
 	t.Setenv("SCRAPER_DBS", "binance,okx")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "")
 
 	_, err := targetDatabases(2026)
 	if err == nil || !strings.Contains(err.Error(), "fixed exchange database") {
@@ -54,6 +57,7 @@ func TestTargetDatabasesUseConfiguredExchangesAndYears(t *testing.T) {
 	t.Setenv("SCRAPER_DBS", "")
 	t.Setenv("SCRAPER_EXCHANGES", "binance")
 	t.Setenv("SCRAPER_YEARS", "2025, 2026")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "")
 
 	got, err := targetDatabases(2026)
 	if err != nil {
@@ -62,6 +66,67 @@ func TestTargetDatabasesUseConfiguredExchangesAndYears(t *testing.T) {
 	want := []string{"binance_2025", "binance_2026"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("targetDatabases = %v, want %v", got, want)
+	}
+}
+
+func TestTargetDatabasesAllowOwnedDeploymentPrefix(t *testing.T) {
+	t.Setenv("SCRAPER_DBS", "")
+	t.Setenv("SCRAPER_EXCHANGES", "binance")
+	t.Setenv("SCRAPER_YEARS", "2025")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "hushine_indicator_chain_abc_")
+
+	got, err := targetDatabases(2026)
+	if err != nil {
+		t.Fatalf("targetDatabases: %v", err)
+	}
+	want := []string{"hushine_indicator_chain_abc_binance_2025"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("targetDatabases = %v, want %v", got, want)
+	}
+}
+
+func TestTargetDatabasesRejectUnsafeDeploymentPrefix(t *testing.T) {
+	t.Setenv("SCRAPER_DBS", "")
+	t.Setenv("SCRAPER_EXCHANGES", "binance")
+	t.Setenv("SCRAPER_YEARS", "2025")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", `chain";drop_`)
+
+	if _, err := targetDatabases(2026); err == nil {
+		t.Fatal("unsafe deployment prefix was accepted")
+	}
+}
+
+func TestTargetDatabasesRejectUppercaseDeploymentPrefix(t *testing.T) {
+	t.Setenv("SCRAPER_DBS", "")
+	t.Setenv("SCRAPER_EXCHANGES", "binance")
+	t.Setenv("SCRAPER_YEARS", "2025")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "Hushine_stage_")
+
+	if _, err := targetDatabases(2026); err == nil ||
+		!strings.Contains(err.Error(), "must be lowercase") {
+		t.Fatalf("uppercase deployment prefix error = %v", err)
+	}
+}
+
+func TestTargetDatabasesRejectOverlengthGeneratedName(t *testing.T) {
+	t.Setenv("SCRAPER_DBS", "")
+	t.Setenv("SCRAPER_EXCHANGES", "binance")
+	t.Setenv("SCRAPER_YEARS", "2025")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", strings.Repeat("a", 55)+"_")
+
+	if _, err := targetDatabases(2026); err == nil ||
+		!strings.Contains(err.Error(), "not a safe PostgreSQL identifier") {
+		t.Fatalf("overlength deployment prefix error = %v", err)
+	}
+}
+
+func TestTargetDatabasesRejectAmbiguousExplicitAndPrefixedConfiguration(t *testing.T) {
+	t.Setenv("SCRAPER_DBS", "binance_2025")
+	t.Setenv("SCRAPER_DATABASE_PREFIX", "hushine_stage_")
+
+	if _, err := targetDatabases(2026); err == nil ||
+		!strings.Contains(err.Error(), "must not be combined") {
+		t.Fatalf("ambiguous scraper database configuration error = %v", err)
 	}
 }
 
