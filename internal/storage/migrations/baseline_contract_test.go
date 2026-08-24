@@ -26,32 +26,32 @@ func TestCurrentMarketDataMigrationSetIsBaselineOnly(t *testing.T) {
 	}
 }
 
-func TestCurrentBaselineContainsAllMarketDataContracts(t *testing.T) {
+func TestCurrentBaselineInstallsOnlyTimescaleForLazySymbolTables(t *testing.T) {
 	raw, err := os.ReadFile("0001_current_schema_baseline.sql")
 	if err != nil {
 		t.Fatalf("read current schema baseline: %v", err)
 	}
 	sql := strings.ToLower(string(raw))
-	for _, forbidden := range []string{"drop table", "drop column", "rename column", "account_id"} {
+	for _, forbidden := range []string{
+		"drop table",
+		"drop column",
+		"rename column",
+		"account_id",
+		"create table",
+		"symbol_year_table_name",
+		"ensure_symbol_year_hypertable",
+		"spot_klines",
+		"futures_klines",
+		"spot_orderbook",
+		"futures_orderbook",
+		"futures_funding_rates",
+		"futures_open_interest",
+	} {
 		if strings.Contains(sql, forbidden) {
-			t.Fatalf("current baseline contains historical operation/name %q", forbidden)
+			t.Fatalf("current baseline contains obsolete fixed-schema operation/name %q", forbidden)
 		}
 	}
-	for _, required := range []string{
-		"create extension if not exists timescaledb",
-		"create table if not exists spot_klines",
-		"create table if not exists futures_klines",
-		"create table if not exists spot_orderbook",
-		"create table if not exists futures_orderbook",
-		"create table if not exists futures_funding_rates",
-		"create table if not exists futures_open_interest",
-		"create or replace function symbol_year_table_name",
-		"create or replace function ensure_symbol_year_hypertable",
-		"chunk_time_interval => interval '1 month'",
-		"create_hypertable",
-	} {
-		if !strings.Contains(sql, required) {
-			t.Fatalf("current baseline missing market-data contract %q", required)
-		}
+	if !strings.Contains(sql, "create extension if not exists timescaledb") {
+		t.Fatal("current baseline must install TimescaleDB before lazy symbol-table creation")
 	}
 }

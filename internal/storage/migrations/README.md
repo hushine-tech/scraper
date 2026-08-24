@@ -7,22 +7,20 @@ Migration files follow the naming convention: `NNNN_description.sql`
 - Files are executed in lexical/numerical order
 - Only `.sql` files are considered for migration
 
-## Runtime behavior
+## Fresh-baseline behavior
 
 - Scraper startup uses migration-first schema initialization via `internal/storage/migrations/`.
+- `0001_current_schema_baseline.sql` is the only fresh-bootstrap migration.
+- The baseline installs TimescaleDB. The migration runner creates and maintains
+  `schema_migrations` separately.
+- Symbol-keyed tables are created lazily on their first write and promoted to
+  monthly TimescaleDB hypertables.
 - Migration execution is idempotent by design (`IF NOT EXISTS` / `if_not_exists => TRUE`).
 - SQL migration execution is logged with `type=sql` entries using `statement=migration:<file>`.
 - Current writes use `{market}_klines_{symbol_lower}_{interval_lower}` for K-lines
   and `{market}_{data_type}_{symbol_lower}` for orderbook / funding / OI.
   Historical backfill separates years by database (`{exchange}_{year}`), not by
   table suffix.
-- `0001_current_schema_baseline.sql` contains both the fixed read-fallback
-  tables and the symbol/year helper functions used for compatibility reads.
-  It is the only fresh-bootstrap migration.
-- Legacy fixed tables (for example `futures_klines`) are retained as read-only fallback for historical data.
-- Legacy symbol-year tables (for example `futures_klines_BTCUSDT_2026`) may still
-  exist in old environments, but they are not part of fresh bootstrap.
-- Dynamically-created per-symbol tables use monthly chunks (`chunk_time_interval => INTERVAL '1 month'`).
 
 ## Mode behavior reference
 
