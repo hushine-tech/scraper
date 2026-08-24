@@ -111,6 +111,45 @@ func TestFreshBaselineCreatesCurrentSymbolKeyedSchema(t *testing.T) {
 		}
 	}
 
+	t.Run("funding reads use only the canonical symbol table", func(t *testing.T) {
+		legacyTables := []struct {
+			name string
+			time time.Time
+			rate float64
+		}{
+			{name: "futures_funding_rates_BTCUSDT_2026", time: now.Add(-time.Minute), rate: 0.002},
+			{name: "futures_funding_rates", time: now.Add(time.Minute), rate: 0.003},
+		}
+		for _, legacy := range legacyTables {
+			if _, err := store.db.ExecContext(ctx, fmt.Sprintf(
+				`CREATE TABLE %s (LIKE futures_funding_rates_btcusdt INCLUDING ALL)`,
+				legacy.name,
+			)); err != nil {
+				t.Fatalf("create legacy funding table %s: %v", legacy.name, err)
+			}
+			if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (time, symbol, market, exchange, funding_rate, mark_price, next_funding_time)
+				VALUES ($1, 'BTCUSDT', 'futures', 'binance', $2, 100, $3)`, legacy.name),
+				legacy.time,
+				legacy.rate,
+				legacy.time.Add(8*time.Hour),
+			); err != nil {
+				t.Fatalf("insert legacy funding row into %s: %v", legacy.name, err)
+			}
+		}
+
+		rates, err := store.QueryFundingRatesByRange(ctx, "BTCUSDT", now.Add(-time.Hour), now.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("query canonical funding rates: %v", err)
+		}
+		if len(rates) != 1 {
+			t.Fatalf("funding rows = %d, want only the canonical row", len(rates))
+		}
+		if !rates[0].Time.Equal(now) || rates[0].FundingRate != 0.001 {
+			t.Fatalf("unexpected canonical funding row: %+v", rates[0])
+		}
+	})
+
 	var migrationCount int
 	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)

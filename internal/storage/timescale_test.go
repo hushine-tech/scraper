@@ -111,41 +111,16 @@ func TestRunMigrationsUsesLedgerAndAdvisoryLock(t *testing.T) {
 	}
 }
 
-func TestBuildSymbolYearTableNameUsesRecordTimestamp(t *testing.T) {
-	table2025 := buildSymbolYearTableName("futures", "funding_rates", "btcusdt", time.Date(2025, 12, 31, 23, 0, 0, 0, time.UTC))
-	table2026 := buildSymbolYearTableName("futures", "funding_rates", "btcusdt", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+func TestInitSchemaRejectsEmptyMigrationsDirectory(t *testing.T) {
+	db, cleanup := newMockDB(t, nil)
+	defer cleanup()
 
-	if table2025 != "futures_funding_rates_BTCUSDT_2025" {
-		t.Fatalf("unexpected table name: %s", table2025)
+	ts := &TimescaleDB{
+		db:      db,
+		sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()),
 	}
-	if table2026 != "futures_funding_rates_BTCUSDT_2026" {
-		t.Fatalf("unexpected table name: %s", table2026)
-	}
-}
-
-func TestBuildReadTableNamesCrossYearIncludesLegacyFallback(t *testing.T) {
-	ts := &TimescaleDB{}
-	tables := ts.buildReadTableNames(
-		"futures",
-		"funding_rates",
-		"btcusdt",
-		time.Date(2025, 12, 31, 23, 0, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC),
-	)
-
-	want := []string{
-		"futures_funding_rates_btcusdt",
-		"futures_funding_rates_BTCUSDT_2025",
-		"futures_funding_rates_BTCUSDT_2026",
-		"futures_funding_rates",
-	}
-	if len(tables) != len(want) {
-		t.Fatalf("unexpected table count: got=%d want=%d tables=%v", len(tables), len(want), tables)
-	}
-	for i := range want {
-		if tables[i] != want[i] {
-			t.Fatalf("unexpected table[%d]: got=%s want=%s", i, tables[i], want[i])
-		}
+	if err := ts.InitSchema(context.Background()); err == nil {
+		t.Fatal("InitSchema with an empty migrations directory succeeded; want a configuration error")
 	}
 }
 

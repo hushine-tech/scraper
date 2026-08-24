@@ -66,10 +66,10 @@ func (ts *TimescaleDB) InitSchema(ctx context.Context) error {
 	if ts.writeRouter != nil {
 		return nil
 	}
-	if ts.migrationsDir != "" {
-		return ts.runMigrations(ctx)
+	if strings.TrimSpace(ts.migrationsDir) == "" {
+		return fmt.Errorf("scraper migrations directory is required")
 	}
-	return ts.initSchemaInline(ctx)
+	return ts.runMigrations(ctx)
 }
 
 func (ts *TimescaleDB) runMigrations(ctx context.Context) error {
@@ -139,114 +139,6 @@ func listMigrationFiles(dir string) ([]string, error) {
 	return migrationFiles, nil
 }
 
-func (ts *TimescaleDB) initSchemaInline(ctx context.Context) error {
-	schema := fmt.Sprintf(`
-	CREATE EXTENSION IF NOT EXISTS timescaledb;
-
-	-- K线表：现货和期货分表
-	CREATE TABLE IF NOT EXISTS spot_klines (
-		time         TIMESTAMPTZ NOT NULL,
-		symbol       TEXT NOT NULL,
-		market       TEXT NOT NULL DEFAULT 'spot',
-		exchange     TEXT NOT NULL DEFAULT '%s',
-		open_time    TIMESTAMPTZ NOT NULL,
-		close_time   TIMESTAMPTZ NOT NULL,
-		open         DOUBLE PRECISION NOT NULL,
-		high         DOUBLE PRECISION NOT NULL,
-		low          DOUBLE PRECISION NOT NULL,
-		close        DOUBLE PRECISION NOT NULL,
-		volume       DOUBLE PRECISION NOT NULL,
-		quote_volume DOUBLE PRECISION NOT NULL,
-		num_trades   BIGINT NOT NULL DEFAULT 0,
-		created_at   TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol)
-	);
-	SELECT create_hypertable('spot_klines', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	CREATE TABLE IF NOT EXISTS futures_klines (
-		time         TIMESTAMPTZ NOT NULL,
-		symbol       TEXT NOT NULL,
-		market       TEXT NOT NULL DEFAULT 'futures',
-		exchange     TEXT NOT NULL DEFAULT '%s',
-		open_time    TIMESTAMPTZ NOT NULL,
-		close_time   TIMESTAMPTZ NOT NULL,
-		open         DOUBLE PRECISION NOT NULL,
-		high         DOUBLE PRECISION NOT NULL,
-		low          DOUBLE PRECISION NOT NULL,
-		close        DOUBLE PRECISION NOT NULL,
-		volume       DOUBLE PRECISION NOT NULL,
-		quote_volume DOUBLE PRECISION NOT NULL,
-		num_trades   BIGINT NOT NULL DEFAULT 0,
-		created_at   TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol)
-	);
-	SELECT create_hypertable('futures_klines', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	-- 订单簿表：现货和期货分表
-	CREATE TABLE IF NOT EXISTS spot_orderbook (
-		time     TIMESTAMPTZ NOT NULL,
-		symbol   TEXT NOT NULL,
-		market   TEXT NOT NULL DEFAULT 'spot',
-		exchange TEXT NOT NULL DEFAULT '%s',
-		bids     JSONB NOT NULL,
-		asks     JSONB NOT NULL,
-		created_at TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol)
-	);
-	SELECT create_hypertable('spot_orderbook', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	CREATE TABLE IF NOT EXISTS futures_orderbook (
-		time     TIMESTAMPTZ NOT NULL,
-		symbol   TEXT NOT NULL,
-		market   TEXT NOT NULL DEFAULT 'futures',
-		exchange TEXT NOT NULL DEFAULT '%s',
-		bids     JSONB NOT NULL,
-		asks     JSONB NOT NULL,
-		created_at TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol)
-	);
-	SELECT create_hypertable('futures_orderbook', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	-- 资金费率表：仅期货
-	CREATE TABLE IF NOT EXISTS futures_funding_rates (
-		time              TIMESTAMPTZ NOT NULL,
-		symbol            TEXT NOT NULL,
-		market            TEXT NOT NULL DEFAULT 'futures',
-		exchange          TEXT NOT NULL DEFAULT '%s',
-		funding_rate      DOUBLE PRECISION NOT NULL,
-		mark_price        DOUBLE PRECISION NOT NULL,
-		next_funding_time TIMESTAMPTZ NOT NULL,
-		created_at        TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol)
-	);
-	SELECT create_hypertable('futures_funding_rates', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	CREATE TABLE IF NOT EXISTS futures_open_interest (
-		time          TIMESTAMPTZ NOT NULL,
-		symbol        TEXT NOT NULL,
-		open_interest DOUBLE PRECISION NOT NULL,
-		period        TEXT NOT NULL DEFAULT 'realtime',
-		market        TEXT NOT NULL DEFAULT 'futures',
-		exchange      TEXT NOT NULL DEFAULT '%s',
-		created_at    TIMESTAMPTZ DEFAULT NOW(),
-		PRIMARY KEY (time, symbol, period)
-	);
-	SELECT create_hypertable('futures_open_interest', 'time', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
-
-	ALTER TABLE IF EXISTS spot_klines
-		ADD COLUMN IF NOT EXISTS num_trades BIGINT NOT NULL DEFAULT 0;
-	ALTER TABLE IF EXISTS futures_klines
-		ADD COLUMN IF NOT EXISTS num_trades BIGINT NOT NULL DEFAULT 0;
-	`, ts.exchange, ts.exchange, ts.exchange, ts.exchange, ts.exchange, ts.exchange)
-
-	_, err := ts.sqlExec.ExecContext(ctx, schema)
-	if err != nil {
-		return fmt.Errorf("failed to initialize schema: %w", err)
-	}
-
-	return nil
-}
-
 // buildTableName 生成表名。K线表含 interval：{market}_klines_{symbol}_{interval}；
 // 其他数据类型不含 interval：{market}_{datatype}_{symbol}。
 func buildTableName(market, dataType, symbol, interval string) string {
@@ -257,15 +149,6 @@ func buildTableName(market, dataType, symbol, interval string) string {
 	}
 	return fmt.Sprintf("%s_%s_%s", m, dataType, normalized)
 }
-
-// buildSymbolYearTableName 保留向后兼容旧的 symbol+year 表（读取旧库时使用）。
-func buildSymbolYearTableName(market, dataType, symbol string, ts time.Time) string {
-	m := normalizeMarket(market)
-	normalized := normalizeSymbolForLegacyTable(symbol)
-	year := ts.UTC().Year()
-	return fmt.Sprintf("%s_%s_%s_%d", m, dataType, normalized, year)
-}
-
 func normalizeMarket(market string) string {
 	m := strings.ToLower(strings.TrimSpace(market))
 	if m != "futures" {
@@ -289,10 +172,6 @@ func normalizeSymbolForTable(symbol string) string {
 }
 
 func normalizeSymbolForWrite(symbol string) string {
-	return strings.ToUpper(strings.TrimSpace(symbol))
-}
-
-func normalizeSymbolForLegacyTable(symbol string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol))
 }
 
@@ -484,7 +363,7 @@ func (ts *TimescaleDB) InsertOrderBook(ctx context.Context, ob models.OrderBook)
 	return nil
 }
 
-// InsertFundingRate 插入到 futures_funding_rates 表
+// InsertFundingRate 插入到当前 symbol-keyed futures funding-rate 表。
 func (ts *TimescaleDB) InsertFundingRate(ctx context.Context, fr models.FundingRate) error {
 	if ts.writeRouter != nil {
 		return ts.writeRouter.InsertFundingRate(ctx, fr)
@@ -560,62 +439,13 @@ func (ts *TimescaleDB) InsertOpenInterests(ctx context.Context, items []models.O
 	return nil
 }
 
-func yearsBetween(startTime, endTime time.Time) []int {
-	start := startTime.UTC()
-	end := endTime.UTC()
-	if end.Before(start) {
-		start, end = end, start
-	}
-	years := make([]int, 0, end.Year()-start.Year()+1)
-	for y := start.Year(); y <= end.Year(); y++ {
-		years = append(years, y)
-	}
-	return years
-}
-
-func (ts *TimescaleDB) buildReadTableNames(market, dataType, symbol string, startTime, endTime time.Time) []string {
-	years := yearsBetween(startTime, endTime)
-	tables := make([]string, 0, len(years)+2)
-	m := normalizeMarket(market)
-	// 当前格式：{market}_{datatype}_{symbol}（无年份后缀，年份由分库隔离）
-	tables = append(tables, buildTableName(m, dataType, symbol, ""))
-	// 旧格式：{market}_{datatype}_{symbol}_{year}（向后兼容未迁移的数据）
-	for _, y := range years {
-		tables = append(tables, buildSymbolYearTableName(m, dataType, symbol, time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC)))
-	}
-	// Legacy table（最早期无 symbol 后缀的表）
-	tables = append(tables, ts.getLegacyTableName(m, dataType))
-	return tables
-}
-
-func (ts *TimescaleDB) getLegacyTableName(market, dataType string) string {
-	switch dataType {
-	case "klines":
-		if market == "futures" {
-			return "futures_klines"
-		}
-		return "spot_klines"
-	case "orderbook":
-		if market == "futures" {
-			return "futures_orderbook"
-		}
-		return "spot_orderbook"
-	case "funding_rates":
-		return "futures_funding_rates"
-	case "open_interest":
-		return "futures_open_interest"
-	default:
-		return ""
-	}
-}
-
 func (ts *TimescaleDB) QueryFundingRatesByRange(
 	ctx context.Context,
 	symbol string,
 	startTime time.Time,
 	endTime time.Time,
 ) ([]models.FundingRate, error) {
-	candidates := ts.buildReadTableNames("futures", "funding_rates", symbol, startTime, endTime)
+	candidates := []string{buildTableName("futures", "funding_rates", symbol, "")}
 	tableNames, err := ts.filterExistingTables(ctx, candidates)
 	if err != nil {
 		return nil, err
