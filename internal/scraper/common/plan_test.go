@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildCollectionPlanForwardDefaultsToAllKinds(t *testing.T) {
-	cfg := config.BinanceConfig{
+	cfg := config.ExchangeConfig{
 		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 	}
@@ -25,7 +25,7 @@ func TestBuildCollectionPlanForwardDefaultsToAllKinds(t *testing.T) {
 }
 
 func TestBuildCollectionPlanReverseSkipsOrderbookWithWarning(t *testing.T) {
-	cfg := config.BinanceConfig{
+	cfg := config.ExchangeConfig{
 		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 		Reverse: config.ReverseConfig{
@@ -49,7 +49,7 @@ func TestBuildCollectionPlanReverseSkipsOrderbookWithWarning(t *testing.T) {
 }
 
 func TestBuildCollectionPlanReverseDefaultsToSupportedKinds(t *testing.T) {
-	cfg := config.BinanceConfig{
+	cfg := config.ExchangeConfig{
 		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 	}
@@ -72,7 +72,7 @@ func TestBuildCollectionPlanReverseDefaultsToSupportedKinds(t *testing.T) {
 }
 
 func TestBuildCollectionPlanUnknownModeFallsBackToForwardWithWarning(t *testing.T) {
-	cfg := config.BinanceConfig{
+	cfg := config.ExchangeConfig{
 		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 	}

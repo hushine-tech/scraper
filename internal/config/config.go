@@ -16,11 +16,11 @@ type Config struct {
 }
 
 type ExchangesConfig struct {
-	Binance BinanceConfig `yaml:"binance"`
-	OKX     OKXConfig     `yaml:"okx"`
+	Binance ExchangeConfig `yaml:"binance"`
+	OKX     ExchangeConfig `yaml:"okx"`
 }
 
-// ExchangeConfig 统一的交易所配置，BinanceConfig 和 OKXConfig 共享同一结构体。
+// ExchangeConfig is the canonical per-exchange configuration.
 type ExchangeConfig struct {
 	Enabled        bool           `yaml:"enabled"`
 	Database       DatabaseConfig `yaml:"database"`
@@ -32,10 +32,6 @@ type ExchangeConfig struct {
 	Forward        ForwardConfig  `yaml:"forward"`
 	Reverse        ReverseConfig  `yaml:"reverse"`
 }
-
-// BinanceConfig 和 OKXConfig 使用相同结构，保持向后兼容的类型别名。
-type BinanceConfig = ExchangeConfig
-type OKXConfig = ExchangeConfig
 
 type AppConfig struct {
 	ScraperInterval int `yaml:"scraper_interval"`
@@ -54,9 +50,7 @@ type MarketDataKafkaConfig struct {
 
 type MarketDataControlPlaneConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// Phase D2: target moved from core-service to control-panel-service.
-	// The YAML key was renamed accordingly. The legacy field name (kept as
-	// `portfolio_service_grpc` until D2) is no longer accepted.
+	// Target for the current market-data control-plane API.
 	MarketDataControlPanelGRPC string `yaml:"market_data_control_panel_grpc"`
 	ReconcileIntervalSeconds   int    `yaml:"reconcile_interval_seconds"`
 	DrainingGracePeriodSeconds int    `yaml:"draining_grace_period_seconds"`

@@ -77,8 +77,8 @@ func TestConfigValidation(t *testing.T) {
 			name: "no exchange enabled",
 			config: Config{
 				Exchanges: ExchangesConfig{
-					Binance: BinanceConfig{Enabled: false},
-					OKX:     OKXConfig{Enabled: false},
+					Binance: ExchangeConfig{Enabled: false},
+					OKX:     ExchangeConfig{Enabled: false},
 				},
 				App: AppConfig{
 					ShutdownTimeout: 30,
@@ -90,7 +90,7 @@ func TestConfigValidation(t *testing.T) {
 			name: "binance enabled but no symbols",
 			config: Config{
 				Exchanges: ExchangesConfig{
-					Binance: BinanceConfig{
+					Binance: ExchangeConfig{
 						Enabled:        true,
 						SpotSymbols:    []string{},
 						FuturesSymbols: []string{},
@@ -106,7 +106,7 @@ func TestConfigValidation(t *testing.T) {
 			name: "fixed exchange database rejected",
 			config: Config{
 				Exchanges: ExchangesConfig{
-					Binance: BinanceConfig{
+					Binance: ExchangeConfig{
 						Enabled:        true,
 						SpotSymbols:    []string{"btcusdt"},
 						FuturesSymbols: []string{"btcusdt"},
@@ -187,7 +187,7 @@ func TestValidateModeNormalizationAndValidation(t *testing.T) {
 	cfg := Config{
 		Mode: " ReVeRsE ",
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled:        true,
 				SpotSymbols:    []string{"btcusdt"},
 				FuturesSymbols: []string{"btcusdt"},
@@ -215,7 +215,7 @@ func TestValidateModeNormalizationAndValidation(t *testing.T) {
 func TestValidateMarketDataKafkaBrokers(t *testing.T) {
 	cfg := Config{
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled:        true,
 				SpotSymbols:    []string{"btcusdt"},
 				FuturesSymbols: []string{"btcusdt"},
@@ -252,7 +252,7 @@ func TestValidateControlPlaneDefaultsAndRequirements(t *testing.T) {
 	cfg := Config{
 		Mode: "forward",
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled:        true,
 				SpotSymbols:    []string{"btcusdt"},
 				FuturesSymbols: []string{"btcusdt"},
@@ -290,7 +290,7 @@ func TestValidateControlPlaneRejectsReverseMode(t *testing.T) {
 	cfg := Config{
 		Mode: "reverse",
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled:        true,
 				SpotSymbols:    []string{"btcusdt"},
 				FuturesSymbols: []string{"btcusdt"},
@@ -316,7 +316,7 @@ func TestValidateControlPlaneRequiresTarget(t *testing.T) {
 	cfg := Config{
 		Mode: "forward",
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled:        true,
 				SpotSymbols:    []string{"btcusdt"},
 				FuturesSymbols: []string{"btcusdt"},
@@ -341,7 +341,7 @@ func TestValidateControlPlaneAllowsManagedExchangeWithoutStaticSymbols(t *testin
 	cfg := Config{
 		Mode: "forward",
 		Exchanges: ExchangesConfig{
-			Binance: BinanceConfig{
+			Binance: ExchangeConfig{
 				Enabled: true,
 			},
 		},

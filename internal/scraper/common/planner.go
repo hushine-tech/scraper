@@ -18,12 +18,12 @@ import (
 )
 
 type Planner struct {
-	config    *config.BinanceConfig
+	config    *config.ExchangeConfig
 	storage   *storage.TimescaleDB
 	sessionID string
 }
 
-func NewPlanner(cfg *config.BinanceConfig, store *storage.TimescaleDB, sessionID string) *Planner {
+func NewPlanner(cfg *config.ExchangeConfig, store *storage.TimescaleDB, sessionID string) *Planner {
 	return &Planner{
 		config:    cfg,
 		storage:   store,

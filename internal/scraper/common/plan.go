@@ -20,15 +20,15 @@ type PlanScope struct {
 }
 
 type CollectionPlan struct {
-	Mode          Direction
-	SpotSymbols   []string
+	Mode           Direction
+	SpotSymbols    []string
 	FuturesSymbols []string
-	EnabledKinds  []KindSelection
-	Scope         PlanScope
-	Warnings      []string
+	EnabledKinds   []KindSelection
+	Scope          PlanScope
+	Warnings       []string
 }
 
-func BuildCollectionPlan(cfg config.BinanceConfig, mode string) CollectionPlan {
+func BuildCollectionPlan(cfg config.ExchangeConfig, mode string) CollectionPlan {
 	normalizedMode := strings.ToLower(strings.TrimSpace(mode))
 	plan := CollectionPlan{
 		Mode:           DirectionForward,
@@ -64,15 +64,15 @@ func BuildCollectionPlan(cfg config.BinanceConfig, mode string) CollectionPlan {
 	return plan
 }
 
-func forwardKinds(cfg config.BinanceConfig) []KindSelection {
+func forwardKinds(cfg config.ExchangeConfig) []KindSelection {
 	fwd := cfg.Forward
 	if !fwd.SpotKline && !fwd.FuturesKline && !fwd.SpotOrderBook && !fwd.FuturesOrderBook && !fwd.FundingRate && !fwd.FuturesOpenInterest {
 		fwd = config.ForwardConfig{
-			SpotKline:        true,
-			FuturesKline:     true,
-			SpotOrderBook:    true,
-			FuturesOrderBook: true,
-			FundingRate:      true,
+			SpotKline:           true,
+			FuturesKline:        true,
+			SpotOrderBook:       true,
+			FuturesOrderBook:    true,
+			FundingRate:         true,
 			FuturesOpenInterest: true,
 		}
 	}
@@ -99,13 +99,13 @@ func forwardKinds(cfg config.BinanceConfig) []KindSelection {
 	return kinds
 }
 
-func reverseKinds(cfg config.BinanceConfig) []KindSelection {
+func reverseKinds(cfg config.ExchangeConfig) []KindSelection {
 	rev := cfg.Reverse
 	if !rev.SpotKline && !rev.FuturesKline && !rev.FundingRate && !rev.FuturesOpenInterest {
 		rev = config.ReverseConfig{
-			SpotKline:    true,
-			FuturesKline: true,
-			FundingRate:  true,
+			SpotKline:           true,
+			FuturesKline:        true,
+			FundingRate:         true,
 			FuturesOpenInterest: true,
 		}
 	}
