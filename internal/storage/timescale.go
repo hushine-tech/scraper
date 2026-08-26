@@ -257,9 +257,9 @@ CREATE TABLE IF NOT EXISTS %s (
 	symbol            TEXT NOT NULL,
 	market            TEXT NOT NULL DEFAULT '%s',
 	exchange          TEXT NOT NULL DEFAULT '%s',
-	funding_rate      DOUBLE PRECISION NOT NULL,
-	mark_price        DOUBLE PRECISION NOT NULL,
-	next_funding_time TIMESTAMPTZ NOT NULL,
+	funding_rate      NUMERIC(38,18) NOT NULL,
+	mark_price        NUMERIC(38,18) NOT NULL,
+	next_funding_time TIMESTAMPTZ,
 	created_at        TIMESTAMPTZ DEFAULT NOW(),
 	PRIMARY KEY (time, symbol)
 );
@@ -381,12 +381,12 @@ func (ts *TimescaleDB) InsertFundingRate(ctx context.Context, fr models.FundingR
 		tableName,
 		insertSQL,
 		createSQL,
-		fr.Time,
+		fr.FundingTime,
 		normalizedSymbol,
 		fr.Market,
 		fr.Exchange,
-		fr.FundingRate,
-		fr.MarkPrice,
+		fr.FundingRateDecimal,
+		fr.MarkPriceDecimal,
 		fr.NextFundingTime,
 	); err != nil {
 		return fmt.Errorf("failed to insert funding rate into %s: %w", tableName, err)
@@ -473,17 +473,24 @@ func (ts *TimescaleDB) QueryFundingRatesByRange(
 
 	result := make([]models.FundingRate, 0)
 	for rows.Next() {
-		var item models.FundingRate
+		var (
+			item          models.FundingRate
+			nextFundingAt sql.NullTime
+		)
 		if err := rows.Scan(
-			&item.Time,
+			&item.FundingTime,
 			&item.Symbol,
 			&item.Market,
 			&item.Exchange,
-			&item.FundingRate,
-			&item.MarkPrice,
-			&item.NextFundingTime,
+			&item.FundingRateDecimal,
+			&item.MarkPriceDecimal,
+			&nextFundingAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan funding rate row: %w", err)
+		}
+		if nextFundingAt.Valid {
+			next := nextFundingAt.Time.UTC()
+			item.NextFundingTime = &next
 		}
 		result = append(result, item)
 	}

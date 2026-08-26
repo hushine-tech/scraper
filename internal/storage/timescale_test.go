@@ -72,6 +72,47 @@ func TestMigrationsContainIdempotentGuards(t *testing.T) {
 	}
 }
 
+func TestFundingStorageUsesExactDecimalColumnsAndScansStrings(t *testing.T) {
+	ts := &TimescaleDB{exchange: "binance"}
+	createSQL := strings.ToLower(ts.buildCreateTableSQL("futures_funding_rates_btcusdt", "futures", "funding_rates"))
+	for _, column := range []string{
+		"funding_rate      numeric(38,18) not null",
+		"mark_price        numeric(38,18) not null",
+	} {
+		if !strings.Contains(createSQL, column) {
+			t.Fatalf("funding create SQL missing %q:\n%s", column, createSQL)
+		}
+	}
+	if strings.Contains(createSQL, "next_funding_time timestamptz not null") {
+		t.Fatalf("funding next time must allow unknown exchange schedules:\n%s", createSQL)
+	}
+
+	db, cleanup := newFundingQueryMockDB(t)
+	defer cleanup()
+	ts.db = db
+	rates, err := ts.QueryFundingRatesByRange(
+		context.Background(),
+		"BTCUSDT",
+		time.Unix(0, 0).UTC(),
+		time.Unix(100, 0).UTC(),
+	)
+	if err != nil {
+		t.Fatalf("query funding rates: %v", err)
+	}
+	if len(rates) != 1 {
+		t.Fatalf("funding rows = %d, want 1", len(rates))
+	}
+	if got, want := rates[0].FundingRateDecimal, "0.000100000000000001"; got != want {
+		t.Fatalf("scanned funding rate decimal = %q, want %q", got, want)
+	}
+	if got, want := rates[0].MarkPriceDecimal, "20000.123456789012345678"; got != want {
+		t.Fatalf("scanned mark price decimal = %q, want %q", got, want)
+	}
+	if rates[0].NextFundingTime != nil {
+		t.Fatalf("scanned next funding time = %s, want unknown", rates[0].NextFundingTime)
+	}
+}
+
 func TestRunMigrationsUsesLedgerAndAdvisoryLock(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "0001_existing.sql"), []byte("SELECT existing"), 0o644); err != nil {
@@ -387,6 +428,70 @@ func (runtimeMigrationTx) Rollback() error {
 type runtimeMigrationRows struct {
 	values []driver.Value
 	read   bool
+}
+
+var fundingQueryMockDriverSeq atomic.Uint64
+
+func newFundingQueryMockDB(t *testing.T) (*sql.DB, func()) {
+	t.Helper()
+	driverName := fmt.Sprintf("funding_query_mock_%d", fundingQueryMockDriverSeq.Add(1))
+	sql.Register(driverName, fundingQueryDriver{})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open funding query mock db: %v", err)
+	}
+	return db, func() { _ = db.Close() }
+}
+
+type fundingQueryDriver struct{}
+
+func (fundingQueryDriver) Open(string) (driver.Conn, error) { return fundingQueryConn{}, nil }
+
+type fundingQueryConn struct{}
+
+func (fundingQueryConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare is not implemented")
+}
+func (fundingQueryConn) Close() error { return nil }
+func (fundingQueryConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("Begin is not implemented")
+}
+
+func (fundingQueryConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	switch {
+	case strings.Contains(query, "to_regclass"):
+		return &fundingQueryRows{
+			columns: []string{"to_regclass"},
+			values:  [][]driver.Value{{"futures_funding_rates_btcusdt"}},
+		}, nil
+	case strings.Contains(query, "FROM futures_funding_rates_btcusdt"):
+		return &fundingQueryRows{
+			columns: []string{"time", "symbol", "market", "exchange", "funding_rate", "mark_price", "next_funding_time"},
+			values: [][]driver.Value{{
+				time.UnixMilli(1000).UTC(), "BTCUSDT", "futures", "binance",
+				"0.000100000000000001", "20000.123456789012345678", nil,
+			}},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unexpected funding query: %s", query)
+	}
+}
+
+type fundingQueryRows struct {
+	columns []string
+	values  [][]driver.Value
+	index   int
+}
+
+func (r *fundingQueryRows) Columns() []string { return r.columns }
+func (r *fundingQueryRows) Close() error      { return nil }
+func (r *fundingQueryRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.values) {
+		return io.EOF
+	}
+	copy(dest, r.values[r.index])
+	r.index++
+	return nil
 }
 
 func (r *runtimeMigrationRows) Columns() []string {

@@ -64,9 +64,10 @@ func TestFreshBaselineCreatesCurrentSymbolKeyedSchema(t *testing.T) {
 			t.Fatalf("insert %s order book: %v", orderBook.Market, err)
 		}
 	}
+	nextFundingTime := time.Date(2026, 8, 24, 18, 0, 0, 0, time.UTC)
 	if err := store.InsertFundingRate(ctx, models.FundingRate{
-		Time: now, Symbol: "BTCUSDT", Market: "futures", Exchange: "binance",
-		FundingRate: 0.001, MarkPrice: 100, NextFundingTime: now.Add(8 * time.Hour),
+		Symbol: "BTCUSDT", Market: "futures", Exchange: "binance",
+		FundingTime: now, FundingRateDecimal: "0.001", MarkPriceDecimal: "100", NextFundingTime: &nextFundingTime,
 	}); err != nil {
 		t.Fatalf("insert funding rate: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestFreshBaselineCreatesCurrentSymbolKeyedSchema(t *testing.T) {
 				VALUES ($1, 'BTCUSDT', 'futures', 'binance', $2, 100, $3)`, legacy.name),
 				legacy.time,
 				legacy.rate,
-				legacy.time.Add(8*time.Hour),
+				time.Date(2026, 8, 24, 18, 0, 0, 0, time.UTC),
 			); err != nil {
 				t.Fatalf("insert legacy funding row into %s: %v", legacy.name, err)
 			}
@@ -145,7 +146,7 @@ func TestFreshBaselineCreatesCurrentSymbolKeyedSchema(t *testing.T) {
 		if len(rates) != 1 {
 			t.Fatalf("funding rows = %d, want only the canonical row", len(rates))
 		}
-		if !rates[0].Time.Equal(now) || rates[0].FundingRate != 0.001 {
+		if !rates[0].FundingTime.Equal(now) || rates[0].FundingRateDecimal != "0.001" {
 			t.Fatalf("unexpected canonical funding row: %+v", rates[0])
 		}
 	})

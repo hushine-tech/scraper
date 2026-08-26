@@ -58,10 +58,10 @@ func TestMarketDataWriteRouterRoutesEventTimestampKinds(t *testing.T) {
 	ctx := context.Background()
 
 	if err := router.InsertFundingRate(ctx, models.FundingRate{
-		Exchange: "binance",
-		Market:   "futures",
-		Symbol:   "BTCUSDT",
-		Time:     time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+		Exchange:    "binance",
+		Market:      "futures",
+		Symbol:      "BTCUSDT",
+		FundingTime: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatalf("InsertFundingRate: %v", err)
 	}
@@ -101,10 +101,10 @@ func TestMarketDataWriteRouterAcquiresLeaseBeforeWrite(t *testing.T) {
 	ctx := context.Background()
 
 	if err := router.InsertFundingRate(ctx, models.FundingRate{
-		Exchange: "binance",
-		Market:   "futures",
-		Symbol:   "BTCUSDT",
-		Time:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Exchange:    "binance",
+		Market:      "futures",
+		Symbol:      "BTCUSDT",
+		FundingTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatalf("InsertFundingRate: %v", err)
 	}

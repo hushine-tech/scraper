@@ -1,6 +1,7 @@
 package binance
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ func (e *Exchange) APIs() []exchange.API {
 		{Name: "futures_open_interest_ws", Type: exchange.APITypeWS, Endpoint: "wss://fstream.binance.com/ws/btcusdt_openinterest"},
 		{Name: "futures_open_interest_rest", Type: exchange.APITypeREST, Endpoint: "https://fapi.binance.com/fapi/v1/openInterest"},
 		{Name: "futures_open_interest_hist_rest", Type: exchange.APITypeREST, Endpoint: "https://fapi.binance.com/fapi/v1/futures/data/openInterestHist"},
+		{Name: "futures_funding_rate_rest", Type: exchange.APITypeREST, Endpoint: "https://fapi.binance.com/fapi/v1/fundingRate"},
+		{Name: "futures_premium_index_rest", Type: exchange.APITypeREST, Endpoint: "https://fapi.binance.com/fapi/v1/premiumIndex"},
 	}
 }
 
@@ -68,16 +71,6 @@ func (e *Exchange) Build(cfg exchange.RuntimeConfig, store *storage.TimescaleDB)
 		}
 	}
 
-	if (cfg.Forward.FundingRate && !reverse) || (reverse && cfg.Reverse.FundingRate) {
-		if len(cfg.FuturesSymbols) > 0 {
-			s := bscraper.NewFundingScraper(cfg.FuturesSymbols, cfg.ExchangeName, store)
-			if reverse {
-				s.SetReverse(parseReverseRange(cfg.Reverse))
-			}
-			scrapers = append(scrapers, s)
-		}
-	}
-
 	if (cfg.Forward.FuturesOpenInterest && !reverse) || (reverse && cfg.Reverse.FuturesOpenInterest) {
 		s := bscraper.NewOpenInterestScraper(cfg.FuturesSymbols, cfg.ExchangeName, store)
 		if reverse {
@@ -87,6 +80,17 @@ func (e *Exchange) Build(cfg exchange.RuntimeConfig, store *storage.TimescaleDB)
 	}
 
 	return scrapers
+}
+
+func (e *Exchange) CollectFundingMarketData(cfg exchange.RuntimeConfig, store *storage.TimescaleDB) (exchange.Scraper, error) {
+	if len(cfg.FuturesSymbols) == 0 {
+		return nil, fmt.Errorf("Binance Funding market data requires Futures symbols")
+	}
+	collector := NewFundingMarketDataCollector(cfg.FuturesSymbols, store)
+	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "reverse") {
+		collector.SetReverse(parseReverseRange(cfg.Reverse))
+	}
+	return collector, nil
 }
 
 func parseReverseRange(cfg config.ReverseConfig) (time.Time, time.Time) {

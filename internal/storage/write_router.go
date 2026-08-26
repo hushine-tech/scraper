@@ -318,11 +318,11 @@ func domainForOrderBook(ob models.OrderBook) WriterLeaseDomain {
 
 func domainForFundingRate(fr models.FundingRate) WriterLeaseDomain {
 	return normalizeWriterLeaseDomain(WriterLeaseDomain{
-		Exchange: fr.Exchange,
-		Market:   fr.Market,
+		Exchange: string(fr.Exchange),
+		Market:   string(fr.Market),
 		Kind:     "funding_rate",
 		Symbol:   fr.Symbol,
-		Year:     yearFrom(fr.Time),
+		Year:     yearFrom(fr.FundingTime),
 	})
 }
 

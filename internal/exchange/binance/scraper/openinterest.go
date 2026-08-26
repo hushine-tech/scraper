@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/hushine-tech/golang-lib/middleware/httpclient"
+	"github.com/hushine-tech/golang-lib/middleware/wsclient"
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/models"
 	base "github.com/hushine-tech/scraper/internal/scraper"
 	"github.com/hushine-tech/scraper/internal/storage"
-	"github.com/gorilla/websocket"
-	"github.com/hushine-tech/golang-lib/middleware/httpclient"
-	"github.com/hushine-tech/golang-lib/middleware/wsclient"
 )
 
 const (

@@ -1,6 +1,10 @@
 package exchange
 
-import "context"
+import (
+	"context"
+
+	"github.com/hushine-tech/scraper/internal/storage"
+)
 
 type APIType string
 
@@ -25,9 +29,8 @@ type Scraper interface {
 	Stop()
 }
 
-type MarketData interface {
-	Kline(symbol string, market string, reverse bool) []Scraper
-	OrderBook(symbol string, market string, reverse bool) []Scraper
-	FundingRate(symbols []string, reverse bool) Scraper
-	OpenInterest(symbols []string, reverse bool) Scraper
+// FundingMarketDataCollector is the optional Futures Funding capability an
+// exchange adapter exposes to the common Registry.
+type FundingMarketDataCollector interface {
+	CollectFundingMarketData(RuntimeConfig, *storage.TimescaleDB) (Scraper, error)
 }

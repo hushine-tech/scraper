@@ -10,9 +10,9 @@ import (
 func TestBuildIncludesOpenInterestForwardAndReverse(t *testing.T) {
 	ex := &Exchange{}
 	fwdScrapers := ex.Build(exchange.RuntimeConfig{
-		Mode:         "forward",
-		ExchangeName: "binance",
-		SpotSymbols:  []string{"btcusdt"},
+		Mode:           "forward",
+		ExchangeName:   "binance",
+		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 		Forward: config.ForwardConfig{
 			SpotKline:           true,
@@ -23,14 +23,14 @@ func TestBuildIncludesOpenInterestForwardAndReverse(t *testing.T) {
 			FuturesOpenInterest: true,
 		},
 	}, nil)
-	if len(fwdScrapers) != 6 {
-		t.Fatalf("expected 6 scrapers in forward mode, got %d", len(fwdScrapers))
+	if len(fwdScrapers) != 5 {
+		t.Fatalf("expected 5 non-Funding scrapers in forward mode, got %d", len(fwdScrapers))
 	}
 
 	revScrapers := ex.Build(exchange.RuntimeConfig{
-		Mode:         "reverse",
-		ExchangeName: "binance",
-		SpotSymbols:  []string{"btcusdt"},
+		Mode:           "reverse",
+		ExchangeName:   "binance",
+		SpotSymbols:    []string{"btcusdt"},
 		FuturesSymbols: []string{"btcusdt"},
 		Reverse: config.ReverseConfig{
 			SpotKline:           true,
@@ -39,7 +39,7 @@ func TestBuildIncludesOpenInterestForwardAndReverse(t *testing.T) {
 			FuturesOpenInterest: true,
 		},
 	}, nil)
-	if len(revScrapers) != 4 {
-		t.Fatalf("expected 4 scrapers in reverse mode, got %d", len(revScrapers))
+	if len(revScrapers) != 3 {
+		t.Fatalf("expected 3 non-Funding scrapers in reverse mode, got %d", len(revScrapers))
 	}
 }
