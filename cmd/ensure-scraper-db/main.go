@@ -10,7 +10,7 @@
 // Usage:
 //
 //	go run ./cmd/ensure-scraper-db
-//	PGHOST=192.168.88.10 PGUSER=postgres PGPASSWORD=postgres go run ./cmd/ensure-scraper-db
+//	PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=postgres go run ./cmd/ensure-scraper-db
 //
 // By default the current-year binance/okx databases are created. To target
 // specific year databases, set SCRAPER_DBS to a comma-separated list, e.g.:
@@ -55,7 +55,7 @@ func main() {
 }
 
 func run() error {
-	host := getenv("PGHOST", "192.168.88.10")
+	host := getenv("PGHOST", "127.0.0.1")
 	port := getenv("PGPORT", "5432")
 	user := getenv("PGUSER", "postgres")
 	pass := getenv("PGPASSWORD", "postgres")

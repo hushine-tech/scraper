@@ -5,13 +5,13 @@
   },
   "kafka": {
     "enabled": false,
-    "brokers": ["192.168.88.10:19092"],
+    "brokers": ["127.0.0.1:9092"],
     "topic": "app-logs",
     "topic_prefix": "app-logs"
   },
   "tracing": {
     "enabled": false,
-    "endpoint": "http://192.168.88.10:4318",
+    "endpoint": "http://127.0.0.1:4318",
     "service_name": "scraper"
   }
 }

@@ -67,6 +67,24 @@ app:
 	}
 }
 
+func TestCurrentConfigUsesLoopbackInfrastructure(t *testing.T) {
+	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig current config: %v", err)
+	}
+	for name, host := range map[string]string{
+		"binance database": cfg.Exchanges.Binance.Database.Host,
+		"okx database":     cfg.Exchanges.OKX.Database.Host,
+	} {
+		if host != "127.0.0.1" {
+			t.Errorf("%s host = %q, want loopback", name, host)
+		}
+	}
+	if got := cfg.MarketData.Kafka.Brokers; len(got) != 1 || got[0] != "127.0.0.1:9092" {
+		t.Fatalf("Kafka brokers = %#v, want loopback", got)
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	tests := []struct {
 		name    string
