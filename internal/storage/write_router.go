@@ -182,6 +182,43 @@ func (r *MarketDataWriteRouter) InsertFundingRate(ctx context.Context, fr models
 	return nil
 }
 
+type fundingPredecessorStore interface {
+	linkFundingRatePredecessor(context.Context, models.FundingRate) (bool, error)
+}
+
+func (r *MarketDataWriteRouter) LinkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) error {
+	domain := domainForFundingRate(successor)
+	years := []int{domain.Year}
+	if domain.Year > 1970 {
+		years = append(years, domain.Year-1)
+	}
+	for _, year := range years {
+		candidate := domain
+		candidate.Year = year
+		lease, err := r.acquireLease(ctx, candidate)
+		if err != nil {
+			return err
+		}
+		store, err := r.storeFor(ctx, candidate.routeKey())
+		if err != nil {
+			return err
+		}
+		linker, ok := store.(fundingPredecessorStore)
+		if !ok {
+			return fmt.Errorf("market-data store for %s does not support Funding predecessor linking", candidate.routeKey().String())
+		}
+		found, err := linker.linkFundingRatePredecessor(ctx, successor)
+		if err != nil {
+			return err
+		}
+		if found {
+			logWrite(candidate, lease, 1)
+			return nil
+		}
+	}
+	return nil
+}
+
 func (r *MarketDataWriteRouter) InsertOpenInterest(ctx context.Context, oi models.OpenInterest) error {
 	domain := domainForOpenInterest(oi)
 	lease, err := r.acquireLease(ctx, domain)

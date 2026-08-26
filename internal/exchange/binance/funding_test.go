@@ -207,8 +207,10 @@ func TestRegistryRejectsFundingWithoutFuturesSymbols(t *testing.T) {
 }
 
 type fundingRateCaptureStore struct {
-	rates     []models.FundingRate
-	insertErr error
+	rates            []models.FundingRate
+	insertErr        error
+	predecessorLinks []models.FundingRate
+	predecessorErr   error
 }
 
 func (s *fundingRateCaptureStore) InsertKline(context.Context, []models.Kline) error { return nil }
@@ -223,6 +225,11 @@ func (s *fundingRateCaptureStore) InsertFundingRate(_ context.Context, rate mode
 	}
 	s.rates = append(s.rates, rate)
 	return nil
+}
+
+func (s *fundingRateCaptureStore) LinkFundingRatePredecessor(_ context.Context, successor models.FundingRate) error {
+	s.predecessorLinks = append(s.predecessorLinks, successor)
+	return s.predecessorErr
 }
 
 func (s *fundingRateCaptureStore) InsertOpenInterest(context.Context, models.OpenInterest) error {
@@ -353,5 +360,63 @@ func TestBackfillFundingHistoryFailureReturnsNoCoverage(t *testing.T) {
 				t.Fatalf("partially stored Funding rows = %d, want %d while still reporting no coverage", len(store.rates), tc.wantPartialRows)
 			}
 		})
+	}
+}
+
+func TestBackfillFundingHistoryLinksIndependentOverlapAndAdjacentRequests(t *testing.T) {
+	responses := map[string]string{
+		"1000": `[
+			{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+			{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000},
+			{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"102","fundingTime":3000}
+		]`,
+		"2000": `[
+			{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000},
+			{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"102","fundingTime":3000},
+			{"symbol":"BTCUSDT","fundingRate":"0.4","markPrice":"103","fundingTime":4000}
+		]`,
+		"4001": `[{"symbol":"BTCUSDT","fundingRate":"0.5","markPrice":"104","fundingTime":5000}]`,
+	}
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		body, ok := responses[req.URL.Query().Get("startTime")]
+		if !ok {
+			t.Fatalf("unexpected independent Funding request startTime=%s", req.URL.Query().Get("startTime"))
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{}
+	for _, window := range [][2]int64{{1000, 3001}, {2000, 4001}, {4001, 5001}, {2000, 4001}} {
+		segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
+			Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
+			StartAt: time.UnixMilli(window[0]).UTC(), EndAt: time.UnixMilli(window[1]).UTC(),
+		}, store)
+		if err != nil || len(segments) != 1 {
+			t.Fatalf("independent Funding window %v = segments %#v err %v", window, segments, err)
+		}
+	}
+	wantLinks := []int64{1000, 2000, 5000, 2000}
+	if len(store.predecessorLinks) != len(wantLinks) {
+		t.Fatalf("predecessor links = %#v, want %v", store.predecessorLinks, wantLinks)
+	}
+	for i, want := range wantLinks {
+		if got := store.predecessorLinks[i].FundingTime.UnixMilli(); got != want {
+			t.Fatalf("predecessor link %d successor = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestBackfillFundingHistoryPredecessorLinkFailureReportsNoCoverage(t *testing.T) {
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[
+			{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":2000}
+		]`))}, nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{predecessorErr: errors.New("predecessor storage failed")}
+	segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
+		StartAt: time.UnixMilli(1000).UTC(), EndAt: time.UnixMilli(2001).UTC(),
+	}, store)
+	if err == nil || !strings.Contains(err.Error(), "predecessor storage failed") || len(segments) != 0 {
+		t.Fatalf("predecessor link failure = segments %#v err %v, want error/no coverage", segments, err)
 	}
 }

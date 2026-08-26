@@ -327,6 +327,9 @@ func (historicalFundingRuntimeStore) InsertOrderBook(context.Context, models.Ord
 func (historicalFundingRuntimeStore) InsertFundingRate(context.Context, models.FundingRate) error {
 	return nil
 }
+func (historicalFundingRuntimeStore) LinkFundingRatePredecessor(context.Context, models.FundingRate) error {
+	return nil
+}
 func (historicalFundingRuntimeStore) InsertOpenInterest(context.Context, models.OpenInterest) error {
 	return nil
 }

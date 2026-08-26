@@ -17,6 +17,7 @@ import (
 
 	"github.com/hushine-tech/golang-lib/middleware/sqlmiddleware"
 	"github.com/hushine-tech/scraper/internal/logger"
+	"github.com/hushine-tech/scraper/internal/models"
 )
 
 func TestListMigrationFilesSorted(t *testing.T) {
@@ -111,6 +112,72 @@ func TestFundingStorageUsesExactDecimalColumnsAndScansStrings(t *testing.T) {
 	if rates[0].NextFundingTime != nil {
 		t.Fatalf("scanned next funding time = %s, want unknown", rates[0].NextFundingTime)
 	}
+}
+
+func TestInsertFundingRateConflictOnlyEnrichesUnknownNextTime(t *testing.T) {
+	var insertSQL string
+	db, cleanup := newMockDB(t, func(query string) error {
+		if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(query)), "INSERT INTO") {
+			insertSQL = query
+		}
+		return nil
+	})
+	defer cleanup()
+	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
+	next := time.UnixMilli(2000).UTC()
+	if err := ts.InsertFundingRate(context.Background(), models.FundingRate{
+		Exchange: models.ExchangeBinance, Market: models.MarketFutures, Symbol: "BTCUSDT",
+		FundingTime: time.UnixMilli(1000).UTC(), FundingRateDecimal: "0.1", MarkPriceDecimal: "100", NextFundingTime: &next,
+	}); err != nil {
+		t.Fatalf("InsertFundingRate: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(insertSQL)), " ")
+	want := "do update set next_funding_time = excluded.next_funding_time where futures_funding_rates_btcusdt.next_funding_time is null and excluded.next_funding_time is not null"
+	if !strings.Contains(normalized, want) {
+		t.Fatalf("Funding conflict SQL does not preserve known successors and enrich only unknown ones:\n%s", insertSQL)
+	}
+}
+
+func TestLinkFundingRatePredecessorTreatsKnownSuccessorAsFound(t *testing.T) {
+	driverName := fmt.Sprintf("funding_predecessor_known_%d", time.Now().UnixNano())
+	sql.Register(driverName, fundingPredecessorKnownDriver{})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open predecessor DB: %v", err)
+	}
+	defer db.Close()
+	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
+	found, err := ts.linkFundingRatePredecessor(context.Background(), models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(2000).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("linkFundingRatePredecessor: %v", err)
+	}
+	if !found {
+		t.Fatal("predecessor with an already-known immutable successor was treated as missing")
+	}
+}
+
+type fundingPredecessorKnownDriver struct{}
+
+func (fundingPredecessorKnownDriver) Open(string) (driver.Conn, error) {
+	return fundingPredecessorKnownConn{}, nil
+}
+
+type fundingPredecessorKnownConn struct{}
+
+func (fundingPredecessorKnownConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare is not implemented")
+}
+func (fundingPredecessorKnownConn) Close() error { return nil }
+func (fundingPredecessorKnownConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("Begin is not implemented")
+}
+func (fundingPredecessorKnownConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return driver.RowsAffected(0), nil
+}
+func (fundingPredecessorKnownConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &fundingQueryRows{columns: []string{"found"}, values: [][]driver.Value{{true}}}, nil
 }
 
 func TestRunMigrationsUsesLedgerAndAdvisoryLock(t *testing.T) {

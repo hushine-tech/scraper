@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/models"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type TimescaleDB struct {
@@ -373,8 +374,11 @@ func (ts *TimescaleDB) InsertFundingRate(ctx context.Context, fr models.FundingR
 	insertSQL := fmt.Sprintf(`
 		INSERT INTO %s (time, symbol, market, exchange, funding_rate, mark_price, next_funding_time)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (time, symbol) DO NOTHING
-	`, tableName)
+		ON CONFLICT (time, symbol) DO UPDATE
+		SET next_funding_time = EXCLUDED.next_funding_time
+		WHERE %s.next_funding_time IS NULL
+		  AND EXCLUDED.next_funding_time IS NOT NULL
+	`, tableName, tableName)
 	createSQL := ts.buildCreateTableSQL(tableName, "futures", "funding_rates")
 	if err := ts.optimisticInsertWithLazyCreate(
 		ctx,
@@ -392,6 +396,47 @@ func (ts *TimescaleDB) InsertFundingRate(ctx context.Context, fr models.FundingR
 		return fmt.Errorf("failed to insert funding rate into %s: %w", tableName, err)
 	}
 	return nil
+}
+
+func (ts *TimescaleDB) LinkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) error {
+	if ts.writeRouter != nil {
+		return ts.writeRouter.LinkFundingRatePredecessor(ctx, successor)
+	}
+	_, err := ts.linkFundingRatePredecessor(ctx, successor)
+	return err
+}
+
+func (ts *TimescaleDB) linkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) (bool, error) {
+	normalizedSymbol := normalizeSymbolForWrite(successor.Symbol)
+	tableName := buildTableName("futures", "funding_rates", normalizedSymbol, "")
+	var found bool
+	err := ts.db.QueryRowContext(ctx, fmt.Sprintf(`
+		WITH candidate AS (
+			SELECT time
+			FROM %s
+			WHERE UPPER(symbol) = UPPER($1)
+			  AND time < $2
+			ORDER BY time DESC
+			LIMIT 1
+		), updated AS (
+			UPDATE %s AS predecessor
+			SET next_funding_time = $2
+			FROM candidate
+			WHERE UPPER(predecessor.symbol) = UPPER($1)
+			  AND predecessor.time = candidate.time
+			  AND predecessor.next_funding_time IS NULL
+			RETURNING 1
+		)
+		SELECT EXISTS (SELECT 1 FROM candidate)
+	`, tableName, tableName), normalizedSymbol, successor.FundingTime.UTC()).Scan(&found)
+	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && string(pqErr.Code) == "42P01" {
+			return false, nil
+		}
+		return false, fmt.Errorf("link Funding predecessor in %s: %w", tableName, err)
+	}
+	return found, nil
 }
 
 func (ts *TimescaleDB) InsertOpenInterest(ctx context.Context, oi models.OpenInterest) error {

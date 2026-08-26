@@ -151,6 +151,41 @@ func TestFreshBaselineCreatesCurrentSymbolKeyedSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("funding conflicts enrich unknown successors without changing known facts", func(t *testing.T) {
+		differentKnown := nextFundingTime.Add(time.Hour)
+		for _, candidate := range []*time.Time{nil, &differentKnown} {
+			if err := store.InsertFundingRate(ctx, models.FundingRate{
+				Symbol: "BTCUSDT", Market: "futures", Exchange: "binance",
+				FundingTime: now, FundingRateDecimal: "9.9", MarkPriceDecimal: "999", NextFundingTime: candidate,
+			}); err != nil {
+				t.Fatalf("retry known Funding row: %v", err)
+			}
+		}
+		unknownTime := now.Add(time.Minute)
+		if err := store.InsertFundingRate(ctx, models.FundingRate{
+			Symbol: "BTCUSDT", Market: "futures", Exchange: "binance",
+			FundingTime: unknownTime, FundingRateDecimal: "0.002", MarkPriceDecimal: "101",
+		}); err != nil {
+			t.Fatalf("insert unknown-successor Funding row: %v", err)
+		}
+		provenSuccessor := unknownTime.Add(8 * time.Hour)
+		if err := store.InsertFundingRate(ctx, models.FundingRate{
+			Symbol: "BTCUSDT", Market: "futures", Exchange: "binance",
+			FundingTime: unknownTime, FundingRateDecimal: "0.002", MarkPriceDecimal: "101", NextFundingTime: &provenSuccessor,
+		}); err != nil {
+			t.Fatalf("enrich unknown Funding successor: %v", err)
+		}
+		rates, err := store.QueryFundingRatesByRange(ctx, "BTCUSDT", now, unknownTime)
+		if err != nil {
+			t.Fatalf("query conflict Funding rows: %v", err)
+		}
+		if len(rates) != 2 || rates[0].NextFundingTime == nil || !rates[0].NextFundingTime.Equal(nextFundingTime) ||
+			rates[0].FundingRateDecimal != "0.001" || rates[0].MarkPriceDecimal != "100" ||
+			rates[1].NextFundingTime == nil || !rates[1].NextFundingTime.Equal(provenSuccessor) {
+			t.Fatalf("Funding conflict facts = %#v", rates)
+		}
+	})
+
 	var migrationCount int
 	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)

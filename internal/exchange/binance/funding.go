@@ -217,6 +217,7 @@ func (c *fundingMarketDataCollector) BackfillFundingHistory(
 	windows := fundingWindowsByYear(req.StartAt, req.EndAt)
 	counts := make(map[int]int64, len(windows))
 	var pending *models.FundingRate
+	predecessorLinked := false
 	for _, window := range windows {
 		cursor := window.start
 		for cursor.Before(window.end) {
@@ -229,6 +230,12 @@ func (c *fundingMarketDataCollector) BackfillFundingHistory(
 				item := page[i]
 				if item.FundingTime.Before(cursor) || !item.FundingTime.Before(window.end) {
 					continue
+				}
+				if !predecessorLinked {
+					if err := store.LinkFundingRatePredecessor(ctx, item); err != nil {
+						return nil, fmt.Errorf("link historical Funding predecessor: %w", err)
+					}
+					predecessorLinked = true
 				}
 				if pending != nil {
 					next := item.FundingTime
