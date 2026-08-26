@@ -105,9 +105,11 @@ func main() {
 	}
 	var runs []runningSet
 	managedFactories := make(map[string]controlplane.CollectorFactory)
+	historicalFundingStores := make(map[string]exchange.HistoricalFundingStore)
 
 	if cfg.Exchanges.Binance.Enabled {
 		store := newRoutedStore("binance", cfg.Exchanges.Binance.Database, migrationsDir)
+		historicalFundingStores["binance"] = store
 		binanceRuntime := exchange.RuntimeConfig{
 			Mode:           mode,
 			ExchangeName:   "binance",
@@ -131,6 +133,7 @@ func main() {
 	}
 	if cfg.Exchanges.OKX.Enabled {
 		store := newRoutedStore("okx", cfg.Exchanges.OKX.Database, migrationsDir)
+		historicalFundingStores["okx"] = store
 		okxRuntime := exchange.RuntimeConfig{
 			Mode:           mode,
 			ExchangeName:   "okx",
@@ -191,11 +194,13 @@ func main() {
 		})
 		plugins = append(plugins, runtime)
 		historyRuntime := controlplane.NewHistoricalRuntime(controlplane.HistoricalRuntimeConfig{
-			Client: client,
+			Client:   client,
+			Registry: registry,
 			Databases: map[string]config.DatabaseConfig{
 				"binance": cfg.Exchanges.Binance.Database,
 				"okx":     cfg.Exchanges.OKX.Database,
 			},
+			FundingStores:     historicalFundingStores,
 			MigrationsDir:     migrationsDir,
 			ReconcileInterval: time.Duration(cfg.MarketData.ControlPlane.ReconcileIntervalSeconds) * time.Second,
 		})

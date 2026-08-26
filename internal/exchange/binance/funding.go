@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hushine-tech/golang-lib/middleware/httpclient"
+	"github.com/hushine-tech/scraper/internal/exchange"
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/models"
 	base "github.com/hushine-tech/scraper/internal/scraper"
@@ -25,6 +26,7 @@ const (
 	premiumIndexPath      = "/fapi/v1/premiumIndex"
 	fundingPollInterval   = time.Minute
 	fundingPageLimit      = 1000
+	fundingCoverageSource = "funding_historical_backfill"
 )
 
 type fundingRatePayload struct {
@@ -184,6 +186,106 @@ func (c *fundingMarketDataCollector) backfillSymbol(ctx context.Context, symbol 
 		}
 	}
 	return nil
+}
+
+func (c *fundingMarketDataCollector) BackfillFundingHistory(
+	ctx context.Context,
+	req exchange.HistoricalFundingRequest,
+	store exchange.HistoricalFundingStore,
+) ([]exchange.HistoricalFundingCoverageSegment, error) {
+	req.Exchange = strings.ToLower(strings.TrimSpace(req.Exchange))
+	req.Market = strings.ToLower(strings.TrimSpace(req.Market))
+	req.Symbol = strings.ToUpper(strings.TrimSpace(req.Symbol))
+	req.StartAt = req.StartAt.UTC()
+	req.EndAt = req.EndAt.UTC()
+	if req.Exchange != "binance" {
+		return nil, fmt.Errorf("Binance historical Funding requires exchange=binance, got %q", req.Exchange)
+	}
+	if req.Market != "futures" {
+		return nil, fmt.Errorf("Binance historical Funding requires market=futures, got %q", req.Market)
+	}
+	if req.Symbol == "" {
+		return nil, fmt.Errorf("Binance historical Funding symbol is required")
+	}
+	if !req.EndAt.After(req.StartAt) {
+		return nil, fmt.Errorf("Binance historical Funding end must be after start")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("Binance historical Funding store is required")
+	}
+
+	windows := fundingWindowsByYear(req.StartAt, req.EndAt)
+	counts := make(map[int]int64, len(windows))
+	var pending *models.FundingRate
+	for _, window := range windows {
+		cursor := window.start
+		for cursor.Before(window.end) {
+			page, err := c.fetchHistoricalFundingRates(ctx, req.Symbol, cursor, window.end)
+			if err != nil {
+				return nil, err
+			}
+			advanced := false
+			for i := range page {
+				item := page[i]
+				if item.FundingTime.Before(cursor) || !item.FundingTime.Before(window.end) {
+					continue
+				}
+				if pending != nil {
+					next := item.FundingTime
+					pending.NextFundingTime = &next
+					if err := store.InsertFundingRate(ctx, *pending); err != nil {
+						return nil, fmt.Errorf("store historical Funding row: %w", err)
+					}
+				}
+				pending = &item
+				counts[item.FundingTime.UTC().Year()]++
+				cursor = item.FundingTime.Add(time.Millisecond)
+				advanced = true
+			}
+			if !advanced {
+				break
+			}
+		}
+	}
+	if pending != nil {
+		pending.NextFundingTime = nil
+		if err := store.InsertFundingRate(ctx, *pending); err != nil {
+			return nil, fmt.Errorf("store final historical Funding row: %w", err)
+		}
+	}
+
+	segments := make([]exchange.HistoricalFundingCoverageSegment, 0, len(windows))
+	for _, window := range windows {
+		segments = append(segments, exchange.HistoricalFundingCoverageSegment{
+			Year:     window.year,
+			StartAt:  window.start,
+			EndAt:    window.end,
+			RowCount: counts[window.year],
+			Source:   fundingCoverageSource,
+		})
+	}
+	return segments, nil
+}
+
+type fundingYearWindow struct {
+	year       int
+	start, end time.Time
+}
+
+func fundingWindowsByYear(start, end time.Time) []fundingYearWindow {
+	start = start.UTC()
+	end = end.UTC()
+	windows := make([]fundingYearWindow, 0, end.Year()-start.Year()+1)
+	for cursor := start; cursor.Before(end); {
+		nextYear := time.Date(cursor.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+		windowEnd := end
+		if nextYear.Before(windowEnd) {
+			windowEnd = nextYear
+		}
+		windows = append(windows, fundingYearWindow{year: cursor.Year(), start: cursor, end: windowEnd})
+		cursor = windowEnd
+	}
+	return windows
 }
 
 func (c *fundingMarketDataCollector) insert(ctx context.Context, rate models.FundingRate) error {

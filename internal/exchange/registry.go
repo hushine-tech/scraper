@@ -1,6 +1,8 @@
 package exchange
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -8,6 +10,8 @@ import (
 	"github.com/hushine-tech/scraper/internal/marketdata"
 	"github.com/hushine-tech/scraper/internal/storage"
 )
+
+var ErrHistoricalFundingUnsupported = errors.New("historical Funding capability is unsupported")
 
 type RuntimeConfig struct {
 	Mode           string
@@ -63,4 +67,31 @@ func (r *Registry) Build(name string, cfg RuntimeConfig, store *storage.Timescal
 func fundingEnabled(cfg RuntimeConfig) bool {
 	reverse := strings.EqualFold(strings.TrimSpace(cfg.Mode), "reverse")
 	return (!reverse && cfg.Forward.FundingRate) || (reverse && cfg.Reverse.FundingRate)
+}
+
+func (r *Registry) HistoricalFunding(name string) (HistoricalFundingBackfiller, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	factory, ok := r.factories[name]
+	if !ok {
+		return nil, fmt.Errorf("exchange %q not registered", name)
+	}
+	provider, ok := factory().(HistoricalFundingBackfillerProvider)
+	if !ok {
+		return nil, fmt.Errorf("%w for exchange %q", ErrHistoricalFundingUnsupported, name)
+	}
+	backfiller := provider.HistoricalFundingBackfiller()
+	if backfiller == nil {
+		return nil, fmt.Errorf("%w for exchange %q", ErrHistoricalFundingUnsupported, name)
+	}
+	return boundHistoricalFundingBackfiller{exchange: name, delegate: backfiller}, nil
+}
+
+type boundHistoricalFundingBackfiller struct {
+	exchange string
+	delegate HistoricalFundingBackfiller
+}
+
+func (b boundHistoricalFundingBackfiller) BackfillFundingHistory(ctx context.Context, req HistoricalFundingRequest, store HistoricalFundingStore) ([]HistoricalFundingCoverageSegment, error) {
+	req.Exchange = b.exchange
+	return b.delegate.BackfillFundingHistory(ctx, req, store)
 }

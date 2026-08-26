@@ -10,9 +10,11 @@ import (
 
 	"github.com/hushine-tech/scraper/internal/backfill"
 	"github.com/hushine-tech/scraper/internal/config"
+	"github.com/hushine-tech/scraper/internal/exchange"
 	"github.com/hushine-tech/scraper/internal/marketdata"
 	"github.com/hushine-tech/scraper/internal/models"
 	basescraper "github.com/hushine-tech/scraper/internal/scraper"
+	"github.com/hushine-tech/scraper/internal/storage"
 )
 
 type fakeClient struct {
@@ -289,6 +291,138 @@ func TestHistoricalRuntimeStopsBeforeReadyWhenCoverageReportFails(t *testing.T) 
 	if strings.Contains(last.LastError, "coverage incomplete after backfill") {
 		t.Fatalf("expected to stop before verify/ready path, got %q", last.LastError)
 	}
+}
+
+type historicalFundingRuntimeAdapter struct {
+	name       string
+	backfiller exchange.HistoricalFundingBackfiller
+}
+
+func (a historicalFundingRuntimeAdapter) Name() string       { return a.name }
+func (historicalFundingRuntimeAdapter) APIs() []exchange.API { return nil }
+func (historicalFundingRuntimeAdapter) Build(exchange.RuntimeConfig, *storage.TimescaleDB) []exchange.Scraper {
+	return nil
+}
+func (a historicalFundingRuntimeAdapter) HistoricalFundingBackfiller() exchange.HistoricalFundingBackfiller {
+	return a.backfiller
+}
+
+type historicalFundingRuntimeBackfiller struct {
+	segments []exchange.HistoricalFundingCoverageSegment
+	err      error
+	calls    []exchange.HistoricalFundingRequest
+}
+
+func (b *historicalFundingRuntimeBackfiller) BackfillFundingHistory(_ context.Context, req exchange.HistoricalFundingRequest, _ exchange.HistoricalFundingStore) ([]exchange.HistoricalFundingCoverageSegment, error) {
+	b.calls = append(b.calls, req)
+	return b.segments, b.err
+}
+
+type historicalFundingRuntimeStore struct{}
+
+func (historicalFundingRuntimeStore) InsertKline(context.Context, []models.Kline) error { return nil }
+func (historicalFundingRuntimeStore) InsertOrderBook(context.Context, models.OrderBook) error {
+	return nil
+}
+func (historicalFundingRuntimeStore) InsertFundingRate(context.Context, models.FundingRate) error {
+	return nil
+}
+func (historicalFundingRuntimeStore) InsertOpenInterest(context.Context, models.OpenInterest) error {
+	return nil
+}
+func (historicalFundingRuntimeStore) InsertOpenInterests(context.Context, []models.OpenInterest) error {
+	return nil
+}
+
+func TestHistoricalRuntimeRoutesFundingCapabilityAndReportsExplicitZeroCoverage(t *testing.T) {
+	start := mustRuntimeTime("2026-01-01T00:00:00Z")
+	end := mustRuntimeTime("2026-01-01T01:00:00Z")
+	backfiller := &historicalFundingRuntimeBackfiller{segments: []exchange.HistoricalFundingCoverageSegment{{
+		Year: 2026, StartAt: start, EndAt: end, RowCount: 0, Source: "funding_historical_backfill",
+	}}}
+	registry := exchange.NewRegistry()
+	registry.Register("paperx", func() exchange.ExchangeAdapter {
+		return historicalFundingRuntimeAdapter{name: "paperx", backfiller: backfiller}
+	})
+	client := &fakeClient{history: []HistoricalRequest{{
+		RequestID:        91,
+		Key:              StreamKey{Exchange: "paperx", Market: "futures", Kind: "funding_rate", Symbol: "BTCUSDT"},
+		RequestedStartAt: &start, RequestedEndAt: &end,
+	}}}
+	runtime := NewHistoricalRuntime(HistoricalRuntimeConfig{
+		Client: client, Registry: registry,
+		Databases:     map[string]config.DatabaseConfig{"paperx": {}},
+		FundingStores: map[string]exchange.HistoricalFundingStore{"paperx": historicalFundingRuntimeStore{}},
+	})
+	if err := runtime.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	waitForHistoryReports(t, client, 2)
+	if len(backfiller.calls) != 1 || backfiller.calls[0].Exchange != "paperx" || backfiller.calls[0].Market != "futures" || backfiller.calls[0].Symbol != "BTCUSDT" {
+		t.Fatalf("Funding capability calls = %#v", backfiller.calls)
+	}
+	if got := client.coverageReportCount(); got != 1 {
+		t.Fatalf("coverage reports = %d, want explicit zero-row segment", got)
+	}
+	report := client.firstCoverageReport(t)
+	if report.Key.Kind != "funding_rate" || report.Key.Interval != "" || report.RowCount != 0 || !report.StartAt.Equal(start) || !report.EndAt.Equal(end) {
+		t.Fatalf("Funding coverage report = %#v", report)
+	}
+	if got := client.lastHistoryReport(t).Status; got != "ready" {
+		t.Fatalf("Funding history status = %q, want ready", got)
+	}
+}
+
+func TestHistoricalRuntimeFundingFailureReportsNoCoverageAndUnsupportedAdapterFailsClosed(t *testing.T) {
+	start := mustRuntimeTime("2026-01-01T00:00:00Z")
+	end := mustRuntimeTime("2026-01-01T01:00:00Z")
+	for _, tc := range []struct {
+		name       string
+		backfiller exchange.HistoricalFundingBackfiller
+	}{
+		{name: "page failure", backfiller: &historicalFundingRuntimeBackfiller{err: errors.New("Funding page failed")}},
+		{name: "unsupported adapter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := exchange.NewRegistry()
+			registry.Register("okx", func() exchange.ExchangeAdapter {
+				return historicalFundingRuntimeAdapter{name: "okx", backfiller: tc.backfiller}
+			})
+			client := &fakeClient{history: []HistoricalRequest{{
+				RequestID: 92, Key: StreamKey{Exchange: "okx", Market: "futures", Kind: "funding_rate", Symbol: "BTCUSDT"},
+				RequestedStartAt: &start, RequestedEndAt: &end,
+			}}}
+			runtime := NewHistoricalRuntime(HistoricalRuntimeConfig{
+				Client: client, Registry: registry,
+				Databases: map[string]config.DatabaseConfig{"okx": {}}, FundingStores: map[string]exchange.HistoricalFundingStore{"okx": historicalFundingRuntimeStore{}},
+			})
+			if err := runtime.ReconcileOnce(context.Background()); err != nil {
+				t.Fatalf("ReconcileOnce: %v", err)
+			}
+			waitForHistoryReports(t, client, 1)
+			if client.coverageReportCount() != 0 {
+				t.Fatal("failed Funding history reported completion coverage")
+			}
+			if got := client.lastHistoryReport(t).Status; got != "error" {
+				t.Fatalf("Funding history status = %q, want error", got)
+			}
+		})
+	}
+}
+
+func waitForHistoryReports(t *testing.T, client *fakeClient, minimum int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		count := len(client.historyReports)
+		client.mu.Unlock()
+		if count >= minimum {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d history reports", minimum)
 }
 
 func historicalRequestForRuntime(start, end time.Time) HistoricalRequest {

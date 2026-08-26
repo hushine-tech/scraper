@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -206,7 +207,8 @@ func TestRegistryRejectsFundingWithoutFuturesSymbols(t *testing.T) {
 }
 
 type fundingRateCaptureStore struct {
-	rates []models.FundingRate
+	rates     []models.FundingRate
+	insertErr error
 }
 
 func (s *fundingRateCaptureStore) InsertKline(context.Context, []models.Kline) error { return nil }
@@ -216,6 +218,9 @@ func (s *fundingRateCaptureStore) InsertOrderBook(context.Context, models.OrderB
 }
 
 func (s *fundingRateCaptureStore) InsertFundingRate(_ context.Context, rate models.FundingRate) error {
+	if s.insertErr != nil {
+		return s.insertErr
+	}
 	s.rates = append(s.rates, rate)
 	return nil
 }
@@ -232,5 +237,121 @@ func TestFundingRateUsesCanonicalRouteTypes(t *testing.T) {
 	rate := models.FundingRate{Exchange: models.ExchangeBinance, Market: models.MarketFutures}
 	if rate.Exchange != models.ExchangeBinance || rate.Market != models.MarketFutures {
 		t.Fatalf("funding route = %+v, want Binance Futures", rate)
+	}
+}
+
+func TestBackfillFundingHistoryReportsExactPerYearCoverageAfterAllPagesSucceed(t *testing.T) {
+	start := time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC)
+	boundary := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := boundary.Add(time.Hour)
+	var calls int
+	collector := &fundingMarketDataCollector{
+		httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+			calls++
+			var body string
+			switch calls {
+			case 1:
+				if got := req.URL.Query().Get("startTime"); got != "1798758000000" {
+					t.Fatalf("2026 startTime = %q, want %d", got, start.UnixMilli())
+				}
+				if got := req.URL.Query().Get("endTime"); got != "1798761600000" {
+					t.Fatalf("2026 endTime = %q, want %d", got, boundary.UnixMilli())
+				}
+				body = `[{"symbol":"BTCUSDT","fundingRate":"0.000100000000000001","markPrice":"20000.123456789012345678","fundingTime":1798761599999}]`
+			case 2:
+				if got := req.URL.Query().Get("startTime"); got != "1798761600000" {
+					t.Fatalf("2027 startTime = %q, want %d", got, boundary.UnixMilli())
+				}
+				body = `[{"symbol":"BTCUSDT","fundingRate":"-0.000200000000000002","markPrice":"20001.000000000000000001","fundingTime":1798765199999}]`
+			default:
+				t.Fatalf("unexpected Funding page %d", calls)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		}}, fundingNoopExtAPILogger{}, "funding_test"),
+	}
+	store := &fundingRateCaptureStore{}
+	segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", StartAt: start, EndAt: end,
+	}, store)
+	if err != nil {
+		t.Fatalf("BackfillFundingHistory: %v", err)
+	}
+	if len(segments) != 2 || segments[0].Year != 2026 || segments[0].RowCount != 1 || !segments[0].StartAt.Equal(start) || !segments[0].EndAt.Equal(boundary) ||
+		segments[1].Year != 2027 || segments[1].RowCount != 1 || !segments[1].StartAt.Equal(boundary) || !segments[1].EndAt.Equal(end) {
+		t.Fatalf("Funding coverage segments = %#v", segments)
+	}
+	if len(store.rates) != 2 {
+		t.Fatalf("stored Funding rates = %d, want 2", len(store.rates))
+	}
+	if store.rates[0].FundingRateDecimal != "0.000100000000000001" || store.rates[0].MarkPriceDecimal != "20000.123456789012345678" ||
+		store.rates[0].NextFundingTime == nil || !store.rates[0].NextFundingTime.Equal(store.rates[1].FundingTime) {
+		t.Fatalf("first exact/cross-year Funding row = %#v", store.rates[0])
+	}
+	if store.rates[1].NextFundingTime != nil {
+		t.Fatalf("final Funding row invented next time: %#v", store.rates[1])
+	}
+}
+
+func TestBackfillFundingHistoryExplicitlyCoversZeroRows(t *testing.T) {
+	collector := &fundingMarketDataCollector{
+		httpClient: httpclient.New(fundingTestDoer{do: func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
+		}}, fundingNoopExtAPILogger{}, "funding_test"),
+	}
+	start := time.Date(2026, 5, 1, 1, 2, 3, 0, time.UTC)
+	end := start.Add(17 * time.Minute)
+	segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", StartAt: start, EndAt: end,
+	}, &fundingRateCaptureStore{})
+	if err != nil {
+		t.Fatalf("BackfillFundingHistory: %v", err)
+	}
+	if len(segments) != 1 || segments[0].RowCount != 0 || !segments[0].StartAt.Equal(start) || !segments[0].EndAt.Equal(end) {
+		t.Fatalf("zero-row Funding coverage = %#v, want explicit requested window", segments)
+	}
+}
+
+func TestBackfillFundingHistoryFailureReturnsNoCoverage(t *testing.T) {
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	for _, tc := range []struct {
+		name            string
+		httpDo          func(*http.Request) (*http.Response, error)
+		storeFail       bool
+		wantPartialRows int
+	}{
+		{name: "partial page failure", httpDo: func() func(*http.Request) (*http.Response, error) {
+			calls := 0
+			return func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 2 {
+					return nil, errors.New("second page transport failed")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[
+					{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1777593600000},
+					{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":1777593601000}
+				]`))}, nil
+			}
+		}(), wantPartialRows: 1},
+		{name: "storage failure", httpDo: func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1777597199999}]`))}, nil
+		}, storeFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: tc.httpDo}, fundingNoopExtAPILogger{}, "funding_test")}
+			store := &fundingRateCaptureStore{}
+			if tc.storeFail {
+				store.insertErr = errors.New("storage failed")
+			}
+			segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
+				Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", StartAt: start, EndAt: end,
+			}, store)
+			if err == nil || len(segments) != 0 {
+				t.Fatalf("BackfillFundingHistory = segments %#v err %v, want error and no coverage", segments, err)
+			}
+			if len(store.rates) != tc.wantPartialRows {
+				t.Fatalf("partially stored Funding rows = %d, want %d while still reporting no coverage", len(store.rates), tc.wantPartialRows)
+			}
+		})
 	}
 }

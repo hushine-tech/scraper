@@ -93,6 +93,10 @@ func (e *Exchange) CollectFundingMarketData(cfg exchange.RuntimeConfig, store *s
 	return collector, nil
 }
 
+func (e *Exchange) HistoricalFundingBackfiller() exchange.HistoricalFundingBackfiller {
+	return NewFundingMarketDataCollector(nil, nil)
+}
+
 func parseReverseRange(cfg config.ReverseConfig) (time.Time, time.Time) {
 	start := time.Now().UTC().AddDate(0, -1, 0)
 	end := time.Now().UTC()

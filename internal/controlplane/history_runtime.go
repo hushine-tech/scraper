@@ -9,6 +9,7 @@ import (
 
 	"github.com/hushine-tech/scraper/internal/backfill"
 	"github.com/hushine-tech/scraper/internal/config"
+	"github.com/hushine-tech/scraper/internal/exchange"
 	"github.com/hushine-tech/scraper/internal/logger"
 )
 
@@ -19,14 +20,18 @@ var (
 
 type HistoricalRuntimeConfig struct {
 	Client            Client
+	Registry          *exchange.Registry
 	Databases         map[string]config.DatabaseConfig
+	FundingStores     map[string]exchange.HistoricalFundingStore
 	MigrationsDir     string
 	ReconcileInterval time.Duration
 }
 
 type HistoricalRuntime struct {
 	client            Client
+	registry          *exchange.Registry
 	databases         map[string]config.DatabaseConfig
+	fundingStores     map[string]exchange.HistoricalFundingStore
 	migrationsDir     string
 	reconcileInterval time.Duration
 
@@ -44,13 +49,22 @@ func NewHistoricalRuntime(cfg HistoricalRuntimeConfig) *HistoricalRuntime {
 		}
 		dbs[normalized] = db
 	}
+	fundingStores := make(map[string]exchange.HistoricalFundingStore, len(cfg.FundingStores))
+	for name, store := range cfg.FundingStores {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && store != nil {
+			fundingStores[name] = store
+		}
+	}
 	reconcileInterval := cfg.ReconcileInterval
 	if reconcileInterval <= 0 {
 		reconcileInterval = 5 * time.Second
 	}
 	return &HistoricalRuntime{
 		client:            cfg.Client,
+		registry:          cfg.Registry,
 		databases:         dbs,
+		fundingStores:     fundingStores,
 		migrationsDir:     cfg.MigrationsDir,
 		reconcileInterval: reconcileInterval,
 		inFlight:          make(map[int64]context.CancelFunc),
@@ -114,14 +128,6 @@ func (r *HistoricalRuntime) ReconcileOnce(ctx context.Context) error {
 			continue
 		}
 		seen[req.RequestID] = struct{}{}
-		if req.Key.Kind != "kline" {
-			_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
-				RequestID: req.RequestID,
-				Status:    "error",
-				LastError: fmt.Sprintf("historical kind %q is not supported yet", req.Key.Kind),
-			})
-			continue
-		}
 		if req.RequestedStartAt == nil || req.RequestedEndAt == nil {
 			_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
 				RequestID: req.RequestID,
@@ -130,24 +136,104 @@ func (r *HistoricalRuntime) ReconcileOnce(ctx context.Context) error {
 			})
 			continue
 		}
-		dbCfg, ok := r.databases[req.Key.Exchange]
-		if !ok {
-			_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
-				RequestID: req.RequestID,
-				Status:    "error",
-				LastError: fmt.Sprintf("historical exchange %q is not configured in scraper", req.Key.Exchange),
-			})
-			continue
-		}
 		if r.isInFlight(req.RequestID) {
 			continue
 		}
-		childCtx, cancel := context.WithCancel(ctx)
-		r.track(req.RequestID, cancel)
-		go r.runRequest(childCtx, req, dbCfg)
+		switch req.Key.Kind {
+		case "kline":
+			dbCfg, ok := r.databases[req.Key.Exchange]
+			if !ok {
+				_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
+					RequestID: req.RequestID,
+					Status:    "error",
+					LastError: fmt.Sprintf("historical exchange %q is not configured in scraper", req.Key.Exchange),
+				})
+				continue
+			}
+			childCtx, cancel := context.WithCancel(ctx)
+			r.track(req.RequestID, cancel)
+			go r.runRequest(childCtx, req, dbCfg)
+		case "funding_rate":
+			if req.Key.Market != "futures" || req.Key.Interval != "" {
+				_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
+					RequestID: req.RequestID,
+					Status:    "error",
+					LastError: "historical Funding requires market=futures and empty interval",
+				})
+				continue
+			}
+			if r.registry == nil {
+				_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: "historical Funding registry is not configured"})
+				continue
+			}
+			backfiller, err := r.registry.HistoricalFunding(req.Key.Exchange)
+			if err != nil {
+				_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: err.Error()})
+				continue
+			}
+			store := r.fundingStores[req.Key.Exchange]
+			if store == nil {
+				_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: fmt.Sprintf("historical Funding store for exchange %q is not configured", req.Key.Exchange)})
+				continue
+			}
+			childCtx, cancel := context.WithCancel(ctx)
+			r.track(req.RequestID, cancel)
+			go r.runFundingRequest(childCtx, req, backfiller, store)
+		default:
+			_ = r.client.ReportHistoricalState(ctx, HistoricalRequestStateReport{
+				RequestID: req.RequestID,
+				Status:    "error",
+				LastError: fmt.Sprintf("historical kind %q is not supported yet", req.Key.Kind),
+			})
+		}
 	}
 	r.cancelMissing(seen)
 	return nil
+}
+
+func (r *HistoricalRuntime) runFundingRequest(
+	ctx context.Context,
+	req HistoricalRequest,
+	backfiller exchange.HistoricalFundingBackfiller,
+	store exchange.HistoricalFundingStore,
+) {
+	defer r.untrack(req.RequestID)
+	r.reportHistorical(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "running"})
+	segments, err := backfiller.BackfillFundingHistory(ctx, exchange.HistoricalFundingRequest{
+		Exchange: req.Key.Exchange,
+		Market:   req.Key.Market,
+		Symbol:   req.Key.Symbol,
+		StartAt:  req.RequestedStartAt.UTC(),
+		EndAt:    req.RequestedEndAt.UTC(),
+	}, store)
+	if err != nil {
+		r.reportHistorical(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: err.Error()})
+		return
+	}
+	if len(segments) == 0 {
+		r.reportHistorical(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: "historical Funding returned no explicit coverage segments"})
+		return
+	}
+	reports := make([]CoverageSegmentReport, 0, len(segments))
+	for _, segment := range segments {
+		reports = append(reports, CoverageSegmentReport{
+			Key:      req.Key,
+			Year:     int32(segment.Year),
+			StartAt:  segment.StartAt,
+			EndAt:    segment.EndAt,
+			RowCount: segment.RowCount,
+			Source:   segment.Source,
+		})
+	}
+	if err := r.client.ReportCoverageSegments(ctx, reports); err != nil {
+		r.reportHistorical(ctx, HistoricalRequestStateReport{RequestID: req.RequestID, Status: "error", LastError: fmt.Sprintf("coverage report failed: %v", err)})
+		return
+	}
+	start := req.RequestedStartAt.UTC()
+	end := req.RequestedEndAt.UTC()
+	r.reportHistorical(ctx, HistoricalRequestStateReport{
+		RequestID: req.RequestID, Status: "ready", CoveredStartAt: &start, CoveredEndAt: &end,
+	})
 }
 
 func (r *HistoricalRuntime) runRequest(ctx context.Context, req HistoricalRequest, dbCfg config.DatabaseConfig) {
