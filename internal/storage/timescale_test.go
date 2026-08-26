@@ -138,46 +138,157 @@ func TestInsertFundingRateConflictOnlyEnrichesUnknownNextTime(t *testing.T) {
 	}
 }
 
-func TestLinkFundingRatePredecessorTreatsKnownSuccessorAsFound(t *testing.T) {
-	driverName := fmt.Sprintf("funding_predecessor_known_%d", time.Now().UnixNano())
-	sql.Register(driverName, fundingPredecessorKnownDriver{})
+func TestFindFundingRatePredecessorReturnsExactStoredCandidateIdentity(t *testing.T) {
+	state := &fundingAdjacencySQLState{candidate: []driver.Value{
+		time.UnixMilli(1000).UTC(), "BTCUSDT", "futures", "binance", "0.1", "100", nil,
+	}}
+	driverName := fmt.Sprintf("funding_predecessor_exact_%d", time.Now().UnixNano())
+	sql.Register(driverName, fundingAdjacencyDriver{state: state})
 	db, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatalf("open predecessor DB: %v", err)
 	}
 	defer db.Close()
 	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
-	found, err := ts.linkFundingRatePredecessor(context.Background(), models.FundingRate{
+	candidate, err := ts.findFundingRatePredecessor(context.Background(), models.FundingRate{
 		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(2000).UTC(),
 	})
 	if err != nil {
-		t.Fatalf("linkFundingRatePredecessor: %v", err)
+		t.Fatalf("findFundingRatePredecessor: %v", err)
 	}
-	if !found {
-		t.Fatal("predecessor with an already-known immutable successor was treated as missing")
+	if candidate == nil || candidate.FundingTime.UnixMilli() != 1000 || candidate.Symbol != "BTCUSDT" || candidate.Market != "futures" ||
+		candidate.Exchange != "binance" || candidate.FundingRateDecimal != "0.1" || candidate.MarkPriceDecimal != "100" || candidate.NextFundingTime != nil {
+		t.Fatalf("exact stored Funding predecessor = %#v", candidate)
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(state.query)), " ")
+	if !strings.Contains(normalized, "where upper(symbol) = upper($1) and market = $2 and exchange = $3 and time < $4") {
+		t.Fatalf("Funding predecessor query did not bind exact identity:\n%s", state.query)
 	}
 }
 
-type fundingPredecessorKnownDriver struct{}
-
-func (fundingPredecessorKnownDriver) Open(string) (driver.Conn, error) {
-	return fundingPredecessorKnownConn{}, nil
+func TestLinkFundingRateAdjacencyConditionallyBindsExactImmutableIdentity(t *testing.T) {
+	state := &fundingAdjacencySQLState{rowsAffected: 1}
+	driverName := fmt.Sprintf("funding_adjacency_exact_%d", time.Now().UnixNano())
+	sql.Register(driverName, fundingAdjacencyDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open adjacency DB: %v", err)
+	}
+	defer db.Close()
+	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
+	predecessor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(1000).UTC(),
+		FundingRateDecimal: "0.1", MarkPriceDecimal: "100",
+	}
+	successor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(2000).UTC(),
+		FundingRateDecimal: "0.2", MarkPriceDecimal: "101",
+	}
+	if err := ts.linkFundingRateAdjacency(context.Background(), predecessor, successor); err != nil {
+		t.Fatalf("linkFundingRateAdjacency: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(strings.ToLower(state.exec)), " ")
+	want := "where time = $1 and upper(symbol) = upper($2) and market = $3 and exchange = $4 and funding_rate = $5 and mark_price = $6 and next_funding_time is null"
+	if !strings.Contains(normalized, want) {
+		t.Fatalf("exact Funding adjacency update is not identity-bound or immutable:\n%s", state.exec)
+	}
+	if len(state.execArgs) != 7 || state.execArgs[0].Value != predecessor.FundingTime || state.execArgs[1].Value != "BTCUSDT" ||
+		state.execArgs[2].Value != "futures" || state.execArgs[3].Value != "binance" || state.execArgs[4].Value != "0.1" ||
+		state.execArgs[5].Value != "100" || state.execArgs[6].Value != successor.FundingTime {
+		t.Fatalf("exact Funding adjacency arguments = %#v", state.execArgs)
+	}
 }
 
-type fundingPredecessorKnownConn struct{}
+func TestLinkFundingRateAdjacencyRejectsMismatchedSuccessorIdentity(t *testing.T) {
+	state := &fundingAdjacencySQLState{}
+	driverName := fmt.Sprintf("funding_adjacency_mismatch_%d", time.Now().UnixNano())
+	sql.Register(driverName, fundingAdjacencyDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open adjacency DB: %v", err)
+	}
+	defer db.Close()
+	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
+	predecessor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(1000).UTC(),
+		FundingRateDecimal: "0.1", MarkPriceDecimal: "100",
+	}
+	successor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "ETHUSDT", FundingTime: time.UnixMilli(2000).UTC(),
+		FundingRateDecimal: "0.2", MarkPriceDecimal: "101",
+	}
+	err = ts.linkFundingRateAdjacency(context.Background(), predecessor, successor)
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("mismatched Funding adjacency error = %v, want identity mismatch", err)
+	}
+	if state.exec != "" {
+		t.Fatalf("mismatched Funding adjacency reached storage:\n%s", state.exec)
+	}
+}
 
-func (fundingPredecessorKnownConn) Prepare(string) (driver.Stmt, error) {
+func TestLinkFundingRateAdjacencyFailsWhenExactCandidateWasNotUpdated(t *testing.T) {
+	state := &fundingAdjacencySQLState{rowsAffected: 0}
+	driverName := fmt.Sprintf("funding_adjacency_concurrent_change_%d", time.Now().UnixNano())
+	sql.Register(driverName, fundingAdjacencyDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open adjacency DB: %v", err)
+	}
+	defer db.Close()
+	ts := &TimescaleDB{db: db, sqlExec: sqlmiddleware.New(db, logger.NewSQLAdapter()), exchange: "binance"}
+	predecessor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(1000).UTC(),
+		FundingRateDecimal: "0.1", MarkPriceDecimal: "100",
+	}
+	successor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.UnixMilli(2000).UTC(),
+		FundingRateDecimal: "0.2", MarkPriceDecimal: "101",
+	}
+	err = ts.linkFundingRateAdjacency(context.Background(), predecessor, successor)
+	if err == nil || !strings.Contains(err.Error(), "updated 0 rows") {
+		t.Fatalf("concurrently changed Funding adjacency error = %v, want updated 0 rows", err)
+	}
+}
+
+type fundingAdjacencySQLState struct {
+	candidate    []driver.Value
+	query        string
+	queryArgs    []driver.NamedValue
+	exec         string
+	execArgs     []driver.NamedValue
+	rowsAffected int64
+}
+
+type fundingAdjacencyDriver struct{ state *fundingAdjacencySQLState }
+
+func (d fundingAdjacencyDriver) Open(string) (driver.Conn, error) {
+	return fundingAdjacencyConn{state: d.state}, nil
+}
+
+type fundingAdjacencyConn struct{ state *fundingAdjacencySQLState }
+
+func (fundingAdjacencyConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("Prepare is not implemented")
 }
-func (fundingPredecessorKnownConn) Close() error { return nil }
-func (fundingPredecessorKnownConn) Begin() (driver.Tx, error) {
+func (fundingAdjacencyConn) Close() error { return nil }
+func (fundingAdjacencyConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("Begin is not implemented")
 }
-func (fundingPredecessorKnownConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
-	return driver.RowsAffected(0), nil
+func (c fundingAdjacencyConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.state.exec = query
+	c.state.execArgs = append([]driver.NamedValue(nil), args...)
+	return driver.RowsAffected(c.state.rowsAffected), nil
 }
-func (fundingPredecessorKnownConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
-	return &fundingQueryRows{columns: []string{"found"}, values: [][]driver.Value{{true}}}, nil
+func (c fundingAdjacencyConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.state.query = query
+	c.state.queryArgs = append([]driver.NamedValue(nil), args...)
+	if c.state.candidate == nil {
+		return &fundingQueryRows{columns: []string{"time", "symbol", "market", "exchange", "funding_rate", "mark_price", "next_funding_time"}}, nil
+	}
+	return &fundingQueryRows{
+		columns: []string{"time", "symbol", "market", "exchange", "funding_rate", "mark_price", "next_funding_time"},
+		values:  [][]driver.Value{c.state.candidate},
+	}, nil
 }
 
 func TestRunMigrationsUsesLedgerAndAdvisoryLock(t *testing.T) {

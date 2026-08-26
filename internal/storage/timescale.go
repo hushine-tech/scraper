@@ -398,45 +398,98 @@ func (ts *TimescaleDB) InsertFundingRate(ctx context.Context, fr models.FundingR
 	return nil
 }
 
-func (ts *TimescaleDB) LinkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) error {
+func (ts *TimescaleDB) FindFundingRatePredecessor(ctx context.Context, successor models.FundingRate) (*models.FundingRate, error) {
 	if ts.writeRouter != nil {
-		return ts.writeRouter.LinkFundingRatePredecessor(ctx, successor)
+		return ts.writeRouter.FindFundingRatePredecessor(ctx, successor)
 	}
-	_, err := ts.linkFundingRatePredecessor(ctx, successor)
-	return err
+	return ts.findFundingRatePredecessor(ctx, successor)
 }
 
-func (ts *TimescaleDB) linkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) (bool, error) {
+func (ts *TimescaleDB) findFundingRatePredecessor(ctx context.Context, successor models.FundingRate) (*models.FundingRate, error) {
 	normalizedSymbol := normalizeSymbolForWrite(successor.Symbol)
 	tableName := buildTableName("futures", "funding_rates", normalizedSymbol, "")
-	var found bool
+	var (
+		candidate     models.FundingRate
+		nextFundingAt sql.NullTime
+	)
 	err := ts.db.QueryRowContext(ctx, fmt.Sprintf(`
-		WITH candidate AS (
-			SELECT time
-			FROM %s
-			WHERE UPPER(symbol) = UPPER($1)
-			  AND time < $2
-			ORDER BY time DESC
-			LIMIT 1
-		), updated AS (
-			UPDATE %s AS predecessor
-			SET next_funding_time = $2
-			FROM candidate
-			WHERE UPPER(predecessor.symbol) = UPPER($1)
-			  AND predecessor.time = candidate.time
-			  AND predecessor.next_funding_time IS NULL
-			RETURNING 1
-		)
-		SELECT EXISTS (SELECT 1 FROM candidate)
-	`, tableName, tableName), normalizedSymbol, successor.FundingTime.UTC()).Scan(&found)
+		SELECT time, symbol, market, exchange, funding_rate, mark_price, next_funding_time
+		FROM %s
+		WHERE UPPER(symbol) = UPPER($1)
+		  AND market = $2
+		  AND exchange = $3
+		  AND time < $4
+		ORDER BY time DESC
+		LIMIT 1
+	`, tableName), normalizedSymbol, strings.ToLower(strings.TrimSpace(string(successor.Market))), strings.ToLower(strings.TrimSpace(string(successor.Exchange))), successor.FundingTime.UTC()).Scan(
+		&candidate.FundingTime,
+		&candidate.Symbol,
+		&candidate.Market,
+		&candidate.Exchange,
+		&candidate.FundingRateDecimal,
+		&candidate.MarkPriceDecimal,
+		&nextFundingAt,
+	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && string(pqErr.Code) == "42P01" {
-			return false, nil
+			return nil, nil
 		}
-		return false, fmt.Errorf("link Funding predecessor in %s: %w", tableName, err)
+		return nil, fmt.Errorf("find Funding predecessor in %s: %w", tableName, err)
 	}
-	return found, nil
+	if nextFundingAt.Valid {
+		next := nextFundingAt.Time.UTC()
+		candidate.NextFundingTime = &next
+	}
+	return &candidate, nil
+}
+
+func (ts *TimescaleDB) LinkFundingRateAdjacency(ctx context.Context, predecessor, successor models.FundingRate) error {
+	if ts.writeRouter != nil {
+		return ts.writeRouter.LinkFundingRateAdjacency(ctx, predecessor, successor)
+	}
+	return ts.linkFundingRateAdjacency(ctx, predecessor, successor)
+}
+
+func (ts *TimescaleDB) linkFundingRateAdjacency(ctx context.Context, predecessor, successor models.FundingRate) error {
+	if err := validateFundingAdjacencyIdentity(predecessor, successor); err != nil {
+		return err
+	}
+	normalizedSymbol := normalizeSymbolForWrite(predecessor.Symbol)
+	tableName := buildTableName("futures", "funding_rates", normalizedSymbol, "")
+	result, err := ts.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s
+		SET next_funding_time = $7
+		WHERE time = $1
+		  AND UPPER(symbol) = UPPER($2)
+		  AND market = $3
+		  AND exchange = $4
+		  AND funding_rate = $5
+		  AND mark_price = $6
+		  AND next_funding_time IS NULL
+	`, tableName),
+		predecessor.FundingTime.UTC(),
+		normalizedSymbol,
+		strings.ToLower(strings.TrimSpace(string(predecessor.Market))),
+		strings.ToLower(strings.TrimSpace(string(predecessor.Exchange))),
+		predecessor.FundingRateDecimal,
+		predecessor.MarkPriceDecimal,
+		successor.FundingTime.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("link exact Funding adjacency in %s: %w", tableName, err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count exact Funding adjacency update in %s: %w", tableName, err)
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("link exact Funding adjacency in %s updated %d rows, want 1", tableName, rowsAffected)
+	}
+	return nil
 }
 
 func (ts *TimescaleDB) InsertOpenInterest(ctx context.Context, oi models.OpenInterest) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"sort"
@@ -217,7 +218,7 @@ func (c *fundingMarketDataCollector) BackfillFundingHistory(
 	windows := fundingWindowsByYear(req.StartAt, req.EndAt)
 	counts := make(map[int]int64, len(windows))
 	var pending *models.FundingRate
-	predecessorLinked := false
+	predecessorReconciled := false
 	for _, window := range windows {
 		cursor := window.start
 		for cursor.Before(window.end) {
@@ -231,11 +232,11 @@ func (c *fundingMarketDataCollector) BackfillFundingHistory(
 				if item.FundingTime.Before(cursor) || !item.FundingTime.Before(window.end) {
 					continue
 				}
-				if !predecessorLinked {
-					if err := store.LinkFundingRatePredecessor(ctx, item); err != nil {
-						return nil, fmt.Errorf("link historical Funding predecessor: %w", err)
+				if !predecessorReconciled {
+					if err := c.reconcileHistoricalFundingPredecessor(ctx, store, item); err != nil {
+						return nil, err
 					}
-					predecessorLinked = true
+					predecessorReconciled = true
 				}
 				if pending != nil {
 					next := item.FundingTime
@@ -272,6 +273,108 @@ func (c *fundingMarketDataCollector) BackfillFundingHistory(
 		})
 	}
 	return segments, nil
+}
+
+func (c *fundingMarketDataCollector) reconcileHistoricalFundingPredecessor(
+	ctx context.Context,
+	store exchange.HistoricalFundingStore,
+	successor models.FundingRate,
+) error {
+	predecessor, err := store.FindFundingRatePredecessor(ctx, successor)
+	if err != nil {
+		return fmt.Errorf("find historical Funding predecessor: %w", err)
+	}
+	if predecessor == nil || predecessor.NextFundingTime != nil {
+		return nil
+	}
+	proven, err := c.proveHistoricalFundingAdjacency(ctx, *predecessor, successor)
+	if err != nil {
+		return fmt.Errorf("prove historical Funding adjacency: %w", err)
+	}
+	if !proven {
+		return nil
+	}
+	if err := store.LinkFundingRateAdjacency(ctx, *predecessor, successor); err != nil {
+		return fmt.Errorf("link historical Funding adjacency: %w", err)
+	}
+	return nil
+}
+
+func (c *fundingMarketDataCollector) proveHistoricalFundingAdjacency(
+	ctx context.Context,
+	predecessor models.FundingRate,
+	successor models.FundingRate,
+) (bool, error) {
+	if !sameFundingRoute(predecessor, successor) || !predecessor.FundingTime.Before(successor.FundingTime) {
+		return false, nil
+	}
+	cursor := predecessor.FundingTime.UTC()
+	end := successor.FundingTime.UTC().Add(time.Millisecond)
+	matchedPredecessor := false
+	for cursor.Before(end) {
+		page, err := c.fetchHistoricalFundingRates(ctx, successor.Symbol, cursor, end)
+		if err != nil {
+			return false, err
+		}
+		advanced := false
+		for i := range page {
+			item := page[i]
+			if item.FundingTime.Before(cursor) || !item.FundingTime.Before(end) {
+				continue
+			}
+			advanced = true
+			cursor = item.FundingTime.Add(time.Millisecond)
+			if !matchedPredecessor {
+				matched, err := sameFundingFact(predecessor, item)
+				if err != nil {
+					return false, err
+				}
+				if !matched {
+					return false, nil
+				}
+				matchedPredecessor = true
+				continue
+			}
+			return sameFundingFact(successor, item)
+		}
+		if !advanced {
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+func sameFundingRoute(left, right models.FundingRate) bool {
+	return strings.EqualFold(strings.TrimSpace(string(left.Exchange)), strings.TrimSpace(string(right.Exchange))) &&
+		strings.EqualFold(strings.TrimSpace(string(left.Market)), strings.TrimSpace(string(right.Market))) &&
+		strings.EqualFold(strings.TrimSpace(left.Symbol), strings.TrimSpace(right.Symbol))
+}
+
+func sameFundingFact(left, right models.FundingRate) (bool, error) {
+	if !sameFundingRoute(left, right) || !left.FundingTime.Equal(right.FundingTime) {
+		return false, nil
+	}
+	rateMatches, err := sameFundingDecimal(left.FundingRateDecimal, right.FundingRateDecimal)
+	if err != nil {
+		return false, fmt.Errorf("invalid Funding rate decimal: %w", err)
+	}
+	markMatches, err := sameFundingDecimal(left.MarkPriceDecimal, right.MarkPriceDecimal)
+	if err != nil {
+		return false, fmt.Errorf("invalid Funding mark-price decimal: %w", err)
+	}
+	return rateMatches && markMatches, nil
+}
+
+func sameFundingDecimal(left, right string) (bool, error) {
+	leftValue, ok := new(big.Rat).SetString(strings.TrimSpace(left))
+	if !ok {
+		return false, fmt.Errorf("cannot parse %q", left)
+	}
+	rightValue, ok := new(big.Rat).SetString(strings.TrimSpace(right))
+	if !ok {
+		return false, fmt.Errorf("cannot parse %q", right)
+	}
+	return leftValue.Cmp(rightValue) == 0, nil
 }
 
 type fundingYearWindow struct {

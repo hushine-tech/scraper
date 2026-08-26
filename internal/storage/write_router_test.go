@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hushine-tech/scraper/internal/models"
+	"github.com/lib/pq"
 )
 
 func TestDatabaseNameForYearRejectsFixedExchangeDB(t *testing.T) {
@@ -93,34 +94,51 @@ func TestMarketDataWriteRouterRoutesEventTimestampKinds(t *testing.T) {
 	}
 }
 
-func TestMarketDataWriteRouterLinksFundingPredecessorInSuccessorYearThenPriorYear(t *testing.T) {
+func TestMarketDataWriteRouterFindsFundingPredecessorInSuccessorYearThenPriorYear(t *testing.T) {
 	for _, tc := range []struct {
-		name            string
-		sameYearFound   bool
-		wantPriorSearch bool
+		name           string
+		successor      time.Time
+		sameCandidate  *models.FundingRate
+		priorCandidate *models.FundingRate
+		want           time.Time
 	}{
-		{name: "same successor year", sameYearFound: true},
-		{name: "prior year fallback", wantPriorSearch: true},
+		{
+			name:          "same successor year",
+			successor:     time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC),
+			sameCandidate: &models.FundingRate{Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.Date(2027, 1, 31, 23, 0, 0, 0, time.UTC)},
+			want:          time.Date(2027, 1, 31, 23, 0, 0, 0, time.UTC),
+		},
+		{
+			name:           "prior year boundary",
+			successor:      time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+			priorCandidate: &models.FundingRate{Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC)},
+			want:           time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			factory := newCaptureFactory()
 			same, _ := factory.open(context.Background(), "binance", 2027)
-			same.(*captureStore).predecessorFound = tc.sameYearFound
+			same.(*captureStore).predecessor = tc.sameCandidate
 			prior, _ := factory.open(context.Background(), "binance", 2026)
-			prior.(*captureStore).predecessorFound = tc.wantPriorSearch
+			prior.(*captureStore).predecessor = tc.priorCandidate
 			router := NewMarketDataWriteRouter(factory.open)
 			successor := models.FundingRate{
 				Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
-				FundingTime: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+				FundingTime: tc.successor,
 			}
-			if err := router.LinkFundingRatePredecessor(context.Background(), successor); err != nil {
-				t.Fatalf("LinkFundingRatePredecessor: %v", err)
+			candidate, err := router.FindFundingRatePredecessor(context.Background(), successor)
+			if err != nil {
+				t.Fatalf("FindFundingRatePredecessor: %v", err)
 			}
-			if got := len(same.(*captureStore).predecessorLinks); got != 1 {
+			if candidate == nil || !candidate.FundingTime.Equal(tc.want) {
+				t.Fatalf("Funding predecessor = %#v, want time %s", candidate, tc.want)
+			}
+			if got := len(same.(*captureStore).predecessorQueries); got != 1 {
 				t.Fatalf("same-year predecessor searches = %d, want 1", got)
 			}
-			if got := len(prior.(*captureStore).predecessorLinks); (got == 1) != tc.wantPriorSearch {
-				t.Fatalf("prior-year predecessor searches = %d, want searched=%v", got, tc.wantPriorSearch)
+			wantPriorSearch := tc.sameCandidate == nil
+			if got := len(prior.(*captureStore).predecessorQueries); (got == 1) != wantPriorSearch {
+				t.Fatalf("prior-year predecessor searches = %d, want searched=%v", got, wantPriorSearch)
 			}
 		})
 	}
@@ -131,14 +149,49 @@ func TestMarketDataWriteRouterStopsPredecessorFallbackOnStorageFailure(t *testin
 	same, _ := factory.open(context.Background(), "binance", 2027)
 	same.(*captureStore).predecessorErr = errors.New("same-year predecessor query failed")
 	prior, _ := factory.open(context.Background(), "binance", 2026)
-	err := NewMarketDataWriteRouter(factory.open).LinkFundingRatePredecessor(context.Background(), models.FundingRate{
+	_, err := NewMarketDataWriteRouter(factory.open).FindFundingRatePredecessor(context.Background(), models.FundingRate{
 		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
 	})
 	if err == nil || !strings.Contains(err.Error(), "same-year predecessor query failed") {
-		t.Fatalf("LinkFundingRatePredecessor error = %v", err)
+		t.Fatalf("FindFundingRatePredecessor error = %v", err)
 	}
-	if len(prior.(*captureStore).predecessorLinks) != 0 {
+	if len(prior.(*captureStore).predecessorQueries) != 0 {
 		t.Fatal("prior-year predecessor search ran after same-year storage failure")
+	}
+}
+
+func TestMarketDataWriteRouterTreatsMissingPriorYearDatabaseAsNoPredecessor(t *testing.T) {
+	factory := newCaptureFactory()
+	factory.errs["binance_2026"] = fmt.Errorf("open prior year: %w", &pq.Error{Code: "3D000"})
+	candidate, err := NewMarketDataWriteRouter(factory.open).FindFundingRatePredecessor(context.Background(), models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT", FundingTime: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil || candidate != nil {
+		t.Fatalf("first-ever Funding predecessor = %#v err %v, want nil without missing-database failure", candidate, err)
+	}
+}
+
+func TestMarketDataWriteRouterLinksExactFundingAdjacencyInPredecessorYear(t *testing.T) {
+	factory := newCaptureFactory()
+	router := NewMarketDataWriteRouter(factory.open)
+	predecessor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
+		FundingTime: time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC), FundingRateDecimal: "0.1", MarkPriceDecimal: "100",
+	}
+	successor := models.FundingRate{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
+		FundingTime: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), FundingRateDecimal: "0.2", MarkPriceDecimal: "101",
+	}
+	if err := router.LinkFundingRateAdjacency(context.Background(), predecessor, successor); err != nil {
+		t.Fatalf("LinkFundingRateAdjacency: %v", err)
+	}
+	prior := factory.stores["binance_2026"]
+	if prior == nil || len(prior.adjacencyLinks) != 1 || !prior.adjacencyLinks[0].predecessor.FundingTime.Equal(predecessor.FundingTime) ||
+		!prior.adjacencyLinks[0].successor.FundingTime.Equal(successor.FundingTime) {
+		t.Fatalf("prior-year exact Funding adjacency = %#v", prior)
+	}
+	if factory.stores["binance_2027"] != nil {
+		t.Fatal("exact Funding adjacency was routed by successor year instead of predecessor year")
 	}
 }
 
@@ -191,14 +244,18 @@ func TestMarketDataWriteRouterStopsWriteWhenLeaseDenied(t *testing.T) {
 
 type captureFactory struct {
 	stores map[string]*captureStore
+	errs   map[string]error
 }
 
 func newCaptureFactory() *captureFactory {
-	return &captureFactory{stores: map[string]*captureStore{}}
+	return &captureFactory{stores: map[string]*captureStore{}, errs: map[string]error{}}
 }
 
 func (f *captureFactory) open(_ context.Context, exchange string, year int) (MarketDataStore, error) {
 	key := fmt.Sprintf("%s_%d", exchange, year)
+	if err := f.errs[key]; err != nil {
+		return nil, err
+	}
 	store := f.stores[key]
 	if store == nil {
 		store = &captureStore{}
@@ -208,13 +265,20 @@ func (f *captureFactory) open(_ context.Context, exchange string, year int) (Mar
 }
 
 type captureStore struct {
-	klines           [][]models.Kline
-	orderbooks       []models.OrderBook
-	funding          []models.FundingRate
-	openInterest     []models.OpenInterest
-	predecessorLinks []models.FundingRate
-	predecessorFound bool
-	predecessorErr   error
+	klines             [][]models.Kline
+	orderbooks         []models.OrderBook
+	funding            []models.FundingRate
+	openInterest       []models.OpenInterest
+	predecessor        *models.FundingRate
+	predecessorQueries []models.FundingRate
+	predecessorErr     error
+	adjacencyLinks     []captureFundingAdjacencyLink
+	adjacencyErr       error
+}
+
+type captureFundingAdjacencyLink struct {
+	predecessor models.FundingRate
+	successor   models.FundingRate
 }
 
 func (s *captureStore) InsertKline(_ context.Context, klines []models.Kline) error {
@@ -232,9 +296,14 @@ func (s *captureStore) InsertFundingRate(_ context.Context, fr models.FundingRat
 	return nil
 }
 
-func (s *captureStore) linkFundingRatePredecessor(_ context.Context, successor models.FundingRate) (bool, error) {
-	s.predecessorLinks = append(s.predecessorLinks, successor)
-	return s.predecessorFound, s.predecessorErr
+func (s *captureStore) findFundingRatePredecessor(_ context.Context, successor models.FundingRate) (*models.FundingRate, error) {
+	s.predecessorQueries = append(s.predecessorQueries, successor)
+	return s.predecessor, s.predecessorErr
+}
+
+func (s *captureStore) linkFundingRateAdjacency(_ context.Context, predecessor, successor models.FundingRate) error {
+	s.adjacencyLinks = append(s.adjacencyLinks, captureFundingAdjacencyLink{predecessor: predecessor, successor: successor})
+	return s.adjacencyErr
 }
 
 func (s *captureStore) InsertOpenInterest(_ context.Context, oi models.OpenInterest) error {

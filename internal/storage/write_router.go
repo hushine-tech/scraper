@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/hushine-tech/scraper/internal/logger"
 	"github.com/hushine-tech/scraper/internal/models"
+	"github.com/lib/pq"
 )
 
 type MarketDataStore interface {
@@ -183,10 +185,10 @@ func (r *MarketDataWriteRouter) InsertFundingRate(ctx context.Context, fr models
 }
 
 type fundingPredecessorStore interface {
-	linkFundingRatePredecessor(context.Context, models.FundingRate) (bool, error)
+	findFundingRatePredecessor(context.Context, models.FundingRate) (*models.FundingRate, error)
 }
 
-func (r *MarketDataWriteRouter) LinkFundingRatePredecessor(ctx context.Context, successor models.FundingRate) error {
+func (r *MarketDataWriteRouter) FindFundingRatePredecessor(ctx context.Context, successor models.FundingRate) (*models.FundingRate, error) {
 	domain := domainForFundingRate(successor)
 	years := []int{domain.Year}
 	if domain.Year > 1970 {
@@ -195,26 +197,67 @@ func (r *MarketDataWriteRouter) LinkFundingRatePredecessor(ctx context.Context, 
 	for _, year := range years {
 		candidate := domain
 		candidate.Year = year
-		lease, err := r.acquireLease(ctx, candidate)
-		if err != nil {
-			return err
-		}
 		store, err := r.storeFor(ctx, candidate.routeKey())
 		if err != nil {
-			return err
+			if isMissingYearDatabaseError(err) {
+				continue
+			}
+			return nil, err
 		}
 		linker, ok := store.(fundingPredecessorStore)
 		if !ok {
-			return fmt.Errorf("market-data store for %s does not support Funding predecessor linking", candidate.routeKey().String())
+			return nil, fmt.Errorf("market-data store for %s does not support Funding predecessor lookup", candidate.routeKey().String())
 		}
-		found, err := linker.linkFundingRatePredecessor(ctx, successor)
+		predecessor, err := linker.findFundingRatePredecessor(ctx, successor)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if found {
-			logWrite(candidate, lease, 1)
-			return nil
+		if predecessor != nil {
+			return predecessor, nil
 		}
+	}
+	return nil, nil
+}
+
+func isMissingYearDatabaseError(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && string(pqErr.Code) == "3D000"
+}
+
+type fundingAdjacencyStore interface {
+	linkFundingRateAdjacency(context.Context, models.FundingRate, models.FundingRate) error
+}
+
+func (r *MarketDataWriteRouter) LinkFundingRateAdjacency(ctx context.Context, predecessor, successor models.FundingRate) error {
+	if err := validateFundingAdjacencyIdentity(predecessor, successor); err != nil {
+		return err
+	}
+	predecessorDomain := domainForFundingRate(predecessor)
+	lease, err := r.acquireLease(ctx, predecessorDomain)
+	if err != nil {
+		return err
+	}
+	store, err := r.storeFor(ctx, predecessorDomain.routeKey())
+	if err != nil {
+		return err
+	}
+	linker, ok := store.(fundingAdjacencyStore)
+	if !ok {
+		return fmt.Errorf("market-data store for %s does not support exact Funding adjacency linking", predecessorDomain.routeKey().String())
+	}
+	if err := linker.linkFundingRateAdjacency(ctx, predecessor, successor); err != nil {
+		return err
+	}
+	logWrite(predecessorDomain, lease, 1)
+	return nil
+}
+
+func validateFundingAdjacencyIdentity(predecessor, successor models.FundingRate) error {
+	predecessorDomain := domainForFundingRate(predecessor)
+	successorDomain := domainForFundingRate(successor)
+	if predecessorDomain.Exchange != successorDomain.Exchange || predecessorDomain.Market != successorDomain.Market ||
+		predecessorDomain.Symbol != successorDomain.Symbol || !predecessor.FundingTime.Before(successor.FundingTime) {
+		return fmt.Errorf("Funding adjacency identity mismatch")
 	}
 	return nil
 }

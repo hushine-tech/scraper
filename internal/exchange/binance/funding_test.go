@@ -3,8 +3,10 @@ package binance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -207,10 +209,18 @@ func TestRegistryRejectsFundingWithoutFuturesSymbols(t *testing.T) {
 }
 
 type fundingRateCaptureStore struct {
-	rates            []models.FundingRate
-	insertErr        error
-	predecessorLinks []models.FundingRate
-	predecessorErr   error
+	rates              []models.FundingRate
+	insertErr          error
+	predecessor        *models.FundingRate
+	predecessorErr     error
+	predecessorQueries []models.FundingRate
+	adjacencyLinks     []fundingAdjacencyLink
+	adjacencyErr       error
+}
+
+type fundingAdjacencyLink struct {
+	predecessor models.FundingRate
+	successor   models.FundingRate
 }
 
 func (s *fundingRateCaptureStore) InsertKline(context.Context, []models.Kline) error { return nil }
@@ -227,9 +237,28 @@ func (s *fundingRateCaptureStore) InsertFundingRate(_ context.Context, rate mode
 	return nil
 }
 
-func (s *fundingRateCaptureStore) LinkFundingRatePredecessor(_ context.Context, successor models.FundingRate) error {
-	s.predecessorLinks = append(s.predecessorLinks, successor)
-	return s.predecessorErr
+func (s *fundingRateCaptureStore) FindFundingRatePredecessor(_ context.Context, successor models.FundingRate) (*models.FundingRate, error) {
+	s.predecessorQueries = append(s.predecessorQueries, successor)
+	if s.predecessorErr != nil {
+		return nil, s.predecessorErr
+	}
+	if s.predecessor == nil {
+		return nil, nil
+	}
+	candidate := *s.predecessor
+	return &candidate, nil
+}
+
+func (s *fundingRateCaptureStore) LinkFundingRateAdjacency(_ context.Context, predecessor, successor models.FundingRate) error {
+	if s.adjacencyErr != nil {
+		return s.adjacencyErr
+	}
+	s.adjacencyLinks = append(s.adjacencyLinks, fundingAdjacencyLink{predecessor: predecessor, successor: successor})
+	if s.predecessor != nil && s.predecessor.FundingTime.Equal(predecessor.FundingTime) && s.predecessor.NextFundingTime == nil {
+		next := successor.FundingTime
+		s.predecessor.NextFundingTime = &next
+	}
+	return nil
 }
 
 func (s *fundingRateCaptureStore) InsertOpenInterest(context.Context, models.OpenInterest) error {
@@ -363,60 +392,244 @@ func TestBackfillFundingHistoryFailureReturnsNoCoverage(t *testing.T) {
 	}
 }
 
-func TestBackfillFundingHistoryLinksIndependentOverlapAndAdjacentRequests(t *testing.T) {
-	responses := map[string]string{
-		"1000": `[
+func TestBackfillFundingHistoryOverlapEnrichesStoredRowFromObservedPair(t *testing.T) {
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(*http.Request) (*http.Response, error) {
+		return fundingHTTPResponse(`[
 			{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
-			{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000},
-			{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"102","fundingTime":3000}
-		]`,
-		"2000": `[
-			{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000},
-			{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"102","fundingTime":3000},
-			{"symbol":"BTCUSDT","fundingRate":"0.4","markPrice":"103","fundingTime":4000}
-		]`,
-		"4001": `[{"symbol":"BTCUSDT","fundingRate":"0.5","markPrice":"104","fundingTime":5000}]`,
-	}
-	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
-		body, ok := responses[req.URL.Query().Get("startTime")]
-		if !ok {
-			t.Fatalf("unexpected independent Funding request startTime=%s", req.URL.Query().Get("startTime"))
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+		]`), nil
 	}}, fundingNoopExtAPILogger{}, "funding_test")}
 	store := &fundingRateCaptureStore{}
-	for _, window := range [][2]int64{{1000, 3001}, {2000, 4001}, {4001, 5001}, {2000, 4001}} {
-		segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
-			Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
-			StartAt: time.UnixMilli(window[0]).UTC(), EndAt: time.UnixMilli(window[1]).UTC(),
-		}, store)
-		if err != nil || len(segments) != 1 {
-			t.Fatalf("independent Funding window %v = segments %#v err %v", window, segments, err)
-		}
+	segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(1000, 2001), store)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("overlap Funding backfill = segments %#v err %v", segments, err)
 	}
-	wantLinks := []int64{1000, 2000, 5000, 2000}
-	if len(store.predecessorLinks) != len(wantLinks) {
-		t.Fatalf("predecessor links = %#v, want %v", store.predecessorLinks, wantLinks)
-	}
-	for i, want := range wantLinks {
-		if got := store.predecessorLinks[i].FundingTime.UnixMilli(); got != want {
-			t.Fatalf("predecessor link %d successor = %d, want %d", i, got, want)
-		}
+	if len(store.rates) != 2 || store.rates[0].FundingTime.UnixMilli() != 1000 || store.rates[0].NextFundingTime == nil || store.rates[0].NextFundingTime.UnixMilli() != 2000 {
+		t.Fatalf("overlap Funding facts = %#v, want observed 1000 -> 2000 pair", store.rates)
 	}
 }
 
-func TestBackfillFundingHistoryPredecessorLinkFailureReportsNoCoverage(t *testing.T) {
-	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[
-			{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":2000}
-		]`))}, nil
+func TestBackfillFundingHistoryLinksAdjacentRequestOnlyAfterBinanceProofAndIsIdempotent(t *testing.T) {
+	requests := make([]string, 0, 3)
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		start := req.URL.Query().Get("startTime")
+		requests = append(requests, start)
+		switch start {
+		case "2000":
+			return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}]`), nil
+		case "1000":
+			return fundingHTTPResponse(`[
+				{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+			]`), nil
+		default:
+			t.Fatalf("unexpected Funding request startTime=%s", start)
+			return nil, nil
+		}
 	}}, fundingNoopExtAPILogger{}, "funding_test")}
-	store := &fundingRateCaptureStore{predecessorErr: errors.New("predecessor storage failed")}
+	store := &fundingRateCaptureStore{predecessor: fundingFact(1000, "0.1", "100")}
+	for attempt := 0; attempt < 2; attempt++ {
+		segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(2000, 2001), store)
+		if err != nil || len(segments) != 1 {
+			t.Fatalf("adjacent Funding attempt %d = segments %#v err %v", attempt+1, segments, err)
+		}
+	}
+	if got, want := requests, []string{"2000", "1000", "2000"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("adjacency proof requests = %v, want %v", got, want)
+	}
+	if len(store.adjacencyLinks) != 1 {
+		t.Fatalf("exact adjacency links = %#v, want one idempotent link", store.adjacencyLinks)
+	}
+	link := store.adjacencyLinks[0]
+	if link.predecessor.FundingTime.UnixMilli() != 1000 || link.successor.FundingTime.UnixMilli() != 2000 ||
+		link.predecessor.Symbol != "BTCUSDT" || link.successor.Symbol != "BTCUSDT" ||
+		link.predecessor.Exchange != models.ExchangeBinance || link.successor.Exchange != models.ExchangeBinance ||
+		link.predecessor.Market != models.MarketFutures || link.successor.Market != models.MarketFutures {
+		t.Fatalf("exact adjacency identity = %#v", link)
+	}
+}
+
+func TestBackfillFundingHistoryProofComparesPaddedDecimalsByExactValue(t *testing.T) {
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("startTime") == "1000" {
+			return fundingHTTPResponse(`[
+				{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+			]`), nil
+		}
+		return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}]`), nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{predecessor: fundingFact(1000, "0.100000000000000000", "100.000000000000000000")}
+	segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(2000, 2001), store)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("padded-decimal Funding proof = segments %#v err %v", segments, err)
+	}
+	if len(store.adjacencyLinks) != 1 {
+		t.Fatalf("padded database decimals rejected an exact Binance fact: %#v", store.adjacencyLinks)
+	}
+}
+
+func TestBackfillFundingHistoryProofRejectsMalformedDecimals(t *testing.T) {
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("startTime") == "1000" {
+			return fundingHTTPResponse(`[
+				{"symbol":"BTCUSDT","fundingRate":"not-a-decimal","markPrice":"also-bad","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+			]`), nil
+		}
+		return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}]`), nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{predecessor: fundingFact(1000, "not-a-decimal", "also-bad")}
+	segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(2000, 2001), store)
+	if err == nil || !strings.Contains(err.Error(), "invalid Funding rate decimal") || len(segments) != 0 {
+		t.Fatalf("malformed-decimal Funding proof = segments %#v err %v, want fail-closed", segments, err)
+	}
+	if len(store.adjacencyLinks) != 0 {
+		t.Fatalf("malformed Funding decimals proved adjacency: %#v", store.adjacencyLinks)
+	}
+}
+
+func TestBackfillFundingHistoryDoesNotLinkUnprovenCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		candidate *models.FundingRate
+		proofBody string
+	}{
+		{
+			name:      "intervening exchange fact",
+			candidate: fundingFact(1000, "0.1", "100"),
+			proofBody: `[
+				{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"103","fundingTime":3000},
+				{"symbol":"BTCUSDT","fundingRate":"0.5","markPrice":"105","fundingTime":5000}
+			]`,
+		},
+		{
+			name:      "stored candidate facts mismatch exchange proof",
+			candidate: fundingFact(1000, "0.1", "100"),
+			proofBody: `[
+				{"symbol":"BTCUSDT","fundingRate":"9.9","markPrice":"999","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+			]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			successorMS := int64(5000)
+			if tc.name == "stored candidate facts mismatch exchange proof" {
+				successorMS = 2000
+			}
+			collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+				if req.URL.Query().Get("startTime") == "1000" {
+					return fundingHTTPResponse(tc.proofBody), nil
+				}
+				return fundingHTTPResponse(fmt.Sprintf(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":%d}]`, successorMS)), nil
+			}}, fundingNoopExtAPILogger{}, "funding_test")}
+			store := &fundingRateCaptureStore{predecessor: tc.candidate}
+			segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(successorMS, successorMS+1), store)
+			if err != nil || len(segments) != 1 {
+				t.Fatalf("unproven Funding candidate = segments %#v err %v", segments, err)
+			}
+			if len(store.adjacencyLinks) != 0 {
+				t.Fatalf("unproven Funding candidate was linked: %#v", store.adjacencyLinks)
+			}
+		})
+	}
+}
+
+func TestBackfillFundingHistoryPreservesKnownImmutableSuccessor(t *testing.T) {
+	candidate := fundingFact(1000, "0.1", "100")
+	known := time.UnixMilli(3000).UTC()
+	candidate.NextFundingTime = &known
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("startTime") != "2000" {
+			t.Fatalf("known successor triggered an unnecessary proof query: %s", req.URL.RawQuery)
+		}
+		return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}]`), nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{predecessor: candidate}
+	segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(2000, 2001), store)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("known-successor Funding backfill = segments %#v err %v", segments, err)
+	}
+	if len(store.adjacencyLinks) != 0 || store.predecessor.NextFundingTime == nil || store.predecessor.NextFundingTime.UnixMilli() != 3000 {
+		t.Fatalf("known Funding successor changed: candidate=%#v links=%#v", store.predecessor, store.adjacencyLinks)
+	}
+}
+
+func TestBackfillFundingHistoryAdjacencyProofFailuresReportNoCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		predecessorErr error
+		adjacencyErr   error
+		proofErr       error
+		want           string
+	}{
+		{name: "candidate query", predecessorErr: errors.New("candidate query failed"), want: "candidate query failed"},
+		{name: "Binance proof API", proofErr: errors.New("proof transport failed"), want: "proof transport failed"},
+		{name: "exact link", adjacencyErr: errors.New("exact link failed"), want: "exact link failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+				if req.URL.Query().Get("startTime") == "1000" && tc.proofErr != nil {
+					return nil, tc.proofErr
+				}
+				if req.URL.Query().Get("startTime") == "1000" {
+					return fundingHTTPResponse(`[
+						{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+						{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}
+					]`), nil
+				}
+				return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.2","markPrice":"101","fundingTime":2000}]`), nil
+			}}, fundingNoopExtAPILogger{}, "funding_test")}
+			store := &fundingRateCaptureStore{
+				predecessor: fundingFact(1000, "0.1", "100"), predecessorErr: tc.predecessorErr, adjacencyErr: tc.adjacencyErr,
+			}
+			segments, err := collector.BackfillFundingHistory(context.Background(), fundingHistoryRequest(2000, 2001), store)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || len(segments) != 0 {
+				t.Fatalf("adjacency %s failure = segments %#v err %v, want no coverage and %q", tc.name, segments, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestBackfillFundingHistoryDoesNotLinkLatestStoredRowAcrossDisjointGap(t *testing.T) {
+	collector := &fundingMarketDataCollector{httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("startTime") == "1000" {
+			return fundingHTTPResponse(`[
+				{"symbol":"BTCUSDT","fundingRate":"0.1","markPrice":"100","fundingTime":1000},
+				{"symbol":"BTCUSDT","fundingRate":"0.3","markPrice":"103","fundingTime":3000},
+				{"symbol":"BTCUSDT","fundingRate":"0.5","markPrice":"105","fundingTime":5000}
+			]`), nil
+		}
+		return fundingHTTPResponse(`[{"symbol":"BTCUSDT","fundingRate":"0.5","markPrice":"105","fundingTime":5000}]`), nil
+	}}, fundingNoopExtAPILogger{}, "funding_test")}
+	store := &fundingRateCaptureStore{predecessor: fundingFact(1000, "0.1", "100")}
 	segments, err := collector.BackfillFundingHistory(context.Background(), exchange.HistoricalFundingRequest{
 		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
-		StartAt: time.UnixMilli(1000).UTC(), EndAt: time.UnixMilli(2001).UTC(),
+		StartAt: time.UnixMilli(5000).UTC(), EndAt: time.UnixMilli(5001).UTC(),
 	}, store)
-	if err == nil || !strings.Contains(err.Error(), "predecessor storage failed") || len(segments) != 0 {
-		t.Fatalf("predecessor link failure = segments %#v err %v, want error/no coverage", segments, err)
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("disjoint Funding backfill = segments %#v err %v", segments, err)
 	}
+	if len(store.adjacencyLinks) != 0 {
+		t.Fatalf("disjoint Funding backfill linked an unproven predecessor: %#v", store.adjacencyLinks)
+	}
+}
+
+func fundingHistoryRequest(startMS, endMS int64) exchange.HistoricalFundingRequest {
+	return exchange.HistoricalFundingRequest{
+		Exchange: "binance", Market: "futures", Symbol: "BTCUSDT",
+		StartAt: time.UnixMilli(startMS).UTC(), EndAt: time.UnixMilli(endMS).UTC(),
+	}
+}
+
+func fundingFact(atMS int64, rate, mark string) *models.FundingRate {
+	return &models.FundingRate{
+		Exchange: models.ExchangeBinance, Market: models.MarketFutures, Symbol: "BTCUSDT",
+		FundingTime: time.UnixMilli(atMS).UTC(), FundingRateDecimal: rate, MarkPriceDecimal: mark,
+	}
+}
+
+func fundingHTTPResponse(body string) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }

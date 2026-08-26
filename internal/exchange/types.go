@@ -55,7 +55,8 @@ type HistoricalFundingCoverageSegment struct {
 
 type HistoricalFundingStore interface {
 	InsertFundingRate(context.Context, models.FundingRate) error
-	LinkFundingRatePredecessor(context.Context, models.FundingRate) error
+	FindFundingRatePredecessor(context.Context, models.FundingRate) (*models.FundingRate, error)
+	LinkFundingRateAdjacency(context.Context, models.FundingRate, models.FundingRate) error
 }
 
 type HistoricalFundingBackfiller interface {
