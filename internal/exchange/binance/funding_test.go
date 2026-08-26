@@ -14,6 +14,7 @@ import (
 	"github.com/hushine-tech/scraper/internal/exchange"
 	"github.com/hushine-tech/scraper/internal/exchange/okx"
 	"github.com/hushine-tech/scraper/internal/models"
+	"github.com/hushine-tech/scraper/internal/storage"
 )
 
 type fundingTestDoer struct {
@@ -99,6 +100,67 @@ func TestCurrentFundingUsesExchangeNextFundingTime(t *testing.T) {
 	}
 }
 
+func TestHistoricalFundingCarriesNextTimeAcrossHTTPPages(t *testing.T) {
+	var calls int
+	collector := &fundingMarketDataCollector{
+		httpClient: httpclient.New(fundingTestDoer{do: func(req *http.Request) (*http.Response, error) {
+			calls++
+			if got, want := req.URL.Path, "/fapi/v1/fundingRate"; got != want {
+				t.Fatalf("funding history path = %q, want %q", got, want)
+			}
+			var body string
+			switch calls {
+			case 1:
+				if got, want := req.URL.Query().Get("startTime"), "1"; got != want {
+					t.Fatalf("first page start time = %q, want %q", got, want)
+				}
+				body = `[
+					{"symbol":"BTCUSDT","fundingRate":"0.0001","markPrice":"100","fundingTime":1000},
+					{"symbol":"BTCUSDT","fundingRate":"0.0002","markPrice":"101","fundingTime":2000}
+				]`
+			case 2:
+				if got, want := req.URL.Query().Get("startTime"), "2001"; got != want {
+					t.Fatalf("second page start time = %q, want %q", got, want)
+				}
+				body = `[{"symbol":"BTCUSDT","fundingRate":"0.0003","markPrice":"102","fundingTime":3000}]`
+			default:
+				t.Fatalf("unexpected Funding history request %d", calls)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}}, fundingNoopExtAPILogger{}, "funding_test"),
+		done: make(chan struct{}),
+	}
+	capture := &fundingRateCaptureStore{}
+	collector.storage = storage.NewRoutedTimescaleDB(func(context.Context, string, int) (storage.MarketDataStore, error) {
+		return capture, nil
+	})
+
+	if err := collector.backfillSymbol(
+		context.Background(),
+		"BTCUSDT",
+		time.UnixMilli(1).UTC(),
+		time.UnixMilli(3001).UTC(),
+	); err != nil {
+		t.Fatalf("backfill Funding pages: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("Funding HTTP pages = %d, want 2", calls)
+	}
+	if len(capture.rates) != 3 {
+		t.Fatalf("stored Funding rows = %d, want 3", len(capture.rates))
+	}
+	if got, want := capture.rates[1].NextFundingTime, time.UnixMilli(3000).UTC(); got == nil || !got.Equal(want) {
+		t.Fatalf("final row of first page next time = %v, want %s", got, want)
+	}
+	if capture.rates[2].NextFundingTime != nil {
+		t.Fatalf("overall final Funding row next time = %s, want unknown", capture.rates[2].NextFundingTime)
+	}
+}
+
 func TestRegistryKeepsOKXFundingFailClosed(t *testing.T) {
 	registry := exchange.NewRegistry()
 	registry.Register("binance", New)
@@ -115,6 +177,55 @@ func TestRegistryKeepsOKXFundingFailClosed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "funding market data") {
 		t.Fatalf("OKX funding build error = %v, want unsupported funding market data", err)
 	}
+}
+
+func TestRegistryRejectsFundingWithoutFuturesSymbols(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		factory exchange.Factory
+		wantErr string
+	}{
+		{name: "binance", factory: New, wantErr: "Futures symbols"},
+		{name: "okx", factory: okx.New, wantErr: "funding market data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := exchange.NewRegistry()
+			registry.Register(tc.name, tc.factory)
+			_, err := registry.Build(tc.name, exchange.RuntimeConfig{
+				Mode:         "forward",
+				ExchangeName: tc.name,
+				Forward: config.ForwardConfig{
+					FundingRate: true,
+				},
+			}, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("empty-symbol Funding build error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+type fundingRateCaptureStore struct {
+	rates []models.FundingRate
+}
+
+func (s *fundingRateCaptureStore) InsertKline(context.Context, []models.Kline) error { return nil }
+
+func (s *fundingRateCaptureStore) InsertOrderBook(context.Context, models.OrderBook) error {
+	return nil
+}
+
+func (s *fundingRateCaptureStore) InsertFundingRate(_ context.Context, rate models.FundingRate) error {
+	s.rates = append(s.rates, rate)
+	return nil
+}
+
+func (s *fundingRateCaptureStore) InsertOpenInterest(context.Context, models.OpenInterest) error {
+	return nil
+}
+
+func (s *fundingRateCaptureStore) InsertOpenInterests(context.Context, []models.OpenInterest) error {
+	return nil
 }
 
 func TestFundingRateUsesCanonicalRouteTypes(t *testing.T) {

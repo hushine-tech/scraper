@@ -46,7 +46,7 @@ func (r *Registry) Build(name string, cfg RuntimeConfig, store *storage.Timescal
 	}
 	adapter := f()
 	scrapers := adapter.Build(cfg, store)
-	if !fundingEnabled(cfg) || len(cfg.FuturesSymbols) == 0 {
+	if !fundingEnabled(cfg) {
 		return scrapers, nil
 	}
 	collector, ok := adapter.(FundingMarketDataCollector)
