@@ -1,6 +1,6 @@
 # Scraper
 
-> 更新时间：2026-07-10
+> 更新时间：2026-08-28
 
 ## 概述
 
@@ -58,7 +58,7 @@ futures_orderbook_btcusdt
 ## 架构
 
 ```
-control-panel-service（K 线需求 / stream / lease）
+control-panel-service（live K 线 stream/lease + K 线/Funding 历史 request/coverage）
     |
     v
 Scraper (Go) -- REST / WebSocket collectors --> {exchange}_{year} TimescaleDB
@@ -134,20 +134,26 @@ go build -o bin/scraper ./cmd/scraper
 
 ## 需求驱动采集控制面
 
-`kline` v1 控制面已经接进 workspace，当前模型是：
+市场数据控制面已经接进 workspace，当前模型是：
 
 - 用户只声明“需要什么流”，不直接 start / stop `scraper`
 - `control-panel-service` 持久化三类状态：
   - `request`：某个用户声明的需求
   - `stream`：共享物理流的聚合状态
   - `lease`：某个 live session 当前仍在消费该流的 TTL 租约
-- `scraper` 在 `market_data.control_plane.enabled=true` 时按数据库状态 reconcile `starting / running / draining / stopped / error`
-- 运行中的 `kline` 仍然总是写 TimescaleDB；只有 `effective_live_delivery=true` 时才发 Kafka
+- `scraper` 在 `market_data.control_plane.enabled=true` 时按数据库状态 reconcile live K 线的
+  `starting / running / draining / stopped / error`
+- historical runtime 按有限窗口处理 `kline` 与 Futures `funding_rate` request，先写
+  year-sharded TimescaleDB 并上报 coverage，再将 request 标记 ready
+- 运行中的 live `kline` 仍然总是写 TimescaleDB；只有
+  `effective_live_delivery=true` 时才发 Kafka
 - `strategy-service` 的 demo/live session 启动前会做 readiness preflight，并在运行中续租 lease
 
 当前产品边界：
 
-- 只覆盖 `kline`
+- live 动态 collector/lease 只覆盖 `kline`
+- historical request/coverage 覆盖 `kline` 和 Futures `funding_rate`；Funding 的 interval 必须为空
+- `orderbook`、`open_interest` 尚未进入需求驱动控制面
 - 还没有独立管理员 UI
 - 当前 UI 重点是用户提交/取消自己的 stream request，并查看 readiness / freshness / live-delivery 状态
 - 运维排障主要依赖 `strategy-service` diagnostics、日志和 control-plane 状态
@@ -168,8 +174,10 @@ go build -o bin/scraper ./cmd/scraper
 - `historical`
   - 声明一个有限时间窗口
   - `scraper` 会把窗口自动拆到 year-sharded 历史库
+  - 支持 `kline`，并为 Futures K 线需求配套创建 interval 为空的 `funding_rate` 请求
   - 例如 `binance_2025`、`binance_2026`
-  - 请求只有在目标窗口可从 authoritative historical store 读出时才会进入 `ready`
+  - scraper 完成 backfill 并成功上报 coverage 后才会进入 `ready`；K 线要求完整行数，
+    Funding 允许用显式零行 segment 表示该时间段确实没有结算记录
 
 当前库关系：
 
@@ -183,22 +191,10 @@ go build -o bin/scraper ./cmd/scraper
 - backtest 只看 historical coverage，不看 live collector / Kafka
 - demo/live session 只看 live readiness / freshness；历史请求不会替代 live stream
 
-## Rollout / Rollback
+## 部署检查
 
-Rollout:
-
-1. 先升级 `control-panel-service`，确保 market-data 控制面表和 RPC 已生效。
-2. 再升级 `scraper`，让 historical worker 可以轮询请求并回报 `running / verifying / ready / error`。
-3. 最后升级 `quant-handler` / `quant-frontend`，开放 `historical` / `live` 两类入口。
-4. 验证：
-   - historical 请求会落到 `{exchange}_{year}` 库
-   - live 请求持续写 `{exchange}_{year}` 库并按 writer lease 保护写入所有权
-   - backtest 能通过历史 coverage preflight
-   - demo/live session 仍按 live readiness + Kafka delivery 判定
-
-Rollback:
-
-1. 如果 historical worker 不稳定，可以先停 `scraper` 的 historical runtime，只保留 live runtime。
-2. 页面可以回退为只开放 `live` scope；现有 live request / stream / lease 不受影响。
-3. 已写入的 `{exchange}_{year}` 历史库保持只读，不需要清理。
-4. backtest 仍可以直接按 Timescale 历史库运行，只是不会再通过 market-data 页面主动补数。
+当前系统未上线，不用旧协议或静态 K 线回退掩盖控制面失败。部署顺序、live/historical
+验收和失败处理见
+[Market Data Control-Plane Deployment](./docs/market-data-control-plane-rollout.md)。验收不通过时
+停止本环境的 session admission，保留 owner 状态进行修复；不要手工制造 ready coverage，
+也不要删除共享数据库或 volume。
